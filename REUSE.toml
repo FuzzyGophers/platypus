@@ -1,0 +1,27 @@
+version = 1
+
+# Source files carry their own inline SPDX + copyright headers. This declares
+# licensing for everything else (manifests, config, docs, data fixtures, art,
+# binaries) so the whole repo is REUSE-compliant. Run `reuse lint` to check.
+
+[[annotations]]
+path = [
+  "Cargo.toml",
+  "Cargo.lock",
+  "crates/**/Cargo.toml",
+  "rust-toolchain.toml",
+  "deny.toml",
+  "REUSE.toml",
+  ".gitignore",
+  "AUTHORS",
+  "LICENSE",
+  "apps/PlatypusMac/Package.swift",
+  "apps/PlatypusMac/Info.plist",
+  "apps/PlatypusMac/Sources/CPlatypusFFI/include/module.modulemap",
+  "**/*.md",
+  "assets/**",
+  "samples/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "The Platypus Authors"
+SPDX-License-Identifier = "GPL-2.0-only"

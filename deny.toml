@@ -1,0 +1,38 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+# Run: `cargo deny check`. The core is dependency-free today; this gate keeps it
+# honest as the RadioReference (`reqwest`) / SQLite (`rusqlite`) crates arrive.
+
+[licenses]
+# SPDX licenses allowed for dependencies. The project is GPL-2.0-only, so deps must
+# be GPLv2-COMPATIBLE. Note **Apache-2.0 is intentionally absent**: it is NOT
+# compatible with GPLv2 (the exact landmine from the v2-vs-v3 discussion). Crates
+# dual-licensed "MIT OR Apache-2.0" still pass via their MIT side; an Apache-2.0-only
+# crate is correctly rejected. Add a license here only after confirming GPLv2 compat.
+allow = [
+    "GPL-2.0-only",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+# We pre-allow GPLv2-compatible licenses for deps that don't exist yet (zero-dep
+# core), so don't warn that some allowances are currently unused.
+unused-allowed-license = "allow"
+
+[advisories]
+# RustSec advisory DB: fail on known-vulnerable or yanked crates.
+yanked = "deny"
+
+[bans]
+# Surface dependency bloat / supply-chain surprises.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Only crates.io (and explicitly-allowed git sources) — block anything else.
+unknown-registry = "deny"
+unknown-git = "deny"

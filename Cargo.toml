@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 The Platypus Authors
+# Platypus workspace.
+# `platypus-core` is the open, cross-platform backend (no UI, no platform assumptions).
+# Future members (not yet present): a CLI, other front-ends, etc. — all built on core.
+[workspace]
+resolver = "2"
+members = ["crates/platypus-core", "crates/platypus-ffi", "crates/platypus-serial"]
+
+# Shared package metadata, inherited by the crates via `.workspace = true`.
+[workspace.package]
+version = "0.1.0"
+license = "GPL-2.0-only"
+repository = "https://github.com/FuzzyGophers/platypus"
+# Not published to crates.io (yet); guards against an accidental `cargo publish`.
+publish = false
+
+# Release builds abort on panic: the FFI staticlib is linked into a non-Rust (Swift) binary,
+# and a panic must never unwind across the C ABI. `extern "C"` already aborts on unwind
+# (Rust ≥ 1.81); this makes the guarantee explicit + toolchain-independent and drops the
+# unwind tables (smaller lib). Tests run in the dev profile, so they still unwind normally.
+[profile.release]
+panic = "abort"

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 The Platypus Authors
+[package]
+name = "platypus-core"
+version.workspace = true
+edition = "2021"
+description = "Open, cross-platform core for Platypus — a location-first programming manager for radio scanners, with pluggable per-model device profiles."
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The core is intentionally dependency-free so it stays trivially portable and auditable;
+# heavier dependencies live in sibling crates (e.g. platypus-serial), not here.
+[dependencies]
+
+[dev-dependencies]

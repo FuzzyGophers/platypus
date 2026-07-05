@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 The Platypus Authors
+#
+# Build system for the PlatypusMac app (the Swift/macOS front). Independent of the Rust
+# workspace: it consumes the prebuilt FFI staticlib (libplatypus_ffi.a from `target/release`)
+# and the committed, cbindgen-generated header — a Rust contributor never needs `just`.
+# Regenerating the header lives in the root justfile (`just gen-header`), which needs cbindgen.
+
+# `source_directory()` (this file's dir) — not `justfile_directory()` — so paths resolve the
+# same whether run here directly or as the root justfile's `app` module.
+here := source_directory()
+repo := source_directory() / ".." / ".."
+app := here / "Platypus.app"
+
+# Build the app (debug Swift) on the release Rust FFI staticlib.
+default: build
+
+# Copy the committed canonical FFI header into the Swift package. The copy is a build product
+# (gitignored); the single source is crates/platypus-ffi/include/platypus.h. Regenerating that
+# canonical header from the Rust signatures is `just gen-header` (root, needs cbindgen).
+_sync-header:
+    cp "{{repo}}/crates/platypus-ffi/include/platypus.h" "{{here}}/Sources/CPlatypusFFI/include/platypus.h"
+
+# Ensure the header is synced + the release FFI staticlib exists, then build the Swift app.
+build: _sync-header
+    cd "{{repo}}" && cargo build -p platypus-ffi --release
+    cd "{{here}}" && swift build
+
+# Run the app via SwiftPM (debug).
+run: build
+    cd "{{here}}" && swift run
+
+# Swift app unit tests (`@testable import PlatypusMac`). Needs the release FFI staticlib, since
+# the imported app code links the C ABI.
+test: _sync-header
+    cd "{{repo}}" && cargo build -p platypus-ffi --release
+    cd "{{here}}" && swift test
+
+# Headless Swift→FFI→core smoke against the privacy-safe synthetic fixtures.
+smoke: build
+    "{{here}}/.build/debug/PlatypusMac" --libtest "{{repo}}/samples/synthetic"
+
+# Assemble a release Platypus.app so LaunchServices treats it as a GUI app, then sign it
+# if a signing identity is configured (see `_sign`).
+bundle: _sync-header
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{repo}}" && cargo build -p platypus-ffi --release
+    cd "{{here}}" && swift build -c release
+
+    app="{{app}}"
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp "{{here}}/.build/release/PlatypusMac" "$app/Contents/MacOS/PlatypusMac"
+
+    # App icon. Regenerate AppIcon.icns from the source art if missing (needs macOS sips +
+    # iconutil), then drop it into the bundle's Resources.
+    icns="{{here}}/AppIcon.icns"
+    if [ ! -f "$icns" ] && command -v iconutil >/dev/null 2>&1; then
+      src="{{repo}}/assets/icon.jpg"
+      # iconutil requires the staging dir to end in `.iconset` — anything else is rejected.
+      set="{{here}}/AppIcon.iconset"; rm -rf "$set"; mkdir -p "$set"
+      for s in 16 32 128 256 512; do s2=$((s * 2))
+        sips -s format png -z $s $s "$src" --out "$set/icon_${s}x${s}.png" >/dev/null 2>&1 || true
+        sips -s format png -z $s2 $s2 "$src" --out "$set/icon_${s}x${s}@2x.png" >/dev/null 2>&1 || true
+      done
+      iconutil -c icns "$set" -o "$icns" >/dev/null 2>&1 || true
+      rm -rf "$set"
+    fi
+    [ -f "$icns" ] && cp "$icns" "$app/Contents/Resources/AppIcon.icns"
+
+    # Data-source marks: each service's own icon, used to identify/credit the source. These
+    # are third-party trademarks, so they're NOT committed to this GPL repo — fetch them at
+    # bundle time (best-effort) into Resources/ and package them. UI falls back to a text
+    # badge if a fetch fails. (gitignored: Resources/*.png)
+    mkdir -p "{{here}}/Resources"
+    fetch_mark() { # fetch_mark <name> <url>
+      [ -f "{{here}}/Resources/$1.png" ] && return 0
+      curl -sL --max-time 15 "$2" -o "{{here}}/Resources/$1.png" 2>/dev/null || true
+      file "{{here}}/Resources/$1.png" 2>/dev/null | grep -q 'PNG image' || rm -f "{{here}}/Resources/$1.png"
+    }
+    fetch_mark repeaterbook   "https://www.repeaterbook.com/apple-touch-icon.png"
+    fetch_mark radioreference "https://www.radioreference.com/apple-touch-icon.png"
+    cp "{{here}}/Resources/"*.png "$app/Contents/Resources/" 2>/dev/null || true
+
+    # Info.plist: copy the committed template, then stamp the version from the single source
+    # (workspace Cargo.toml) and validate with Apple's plutil — no XML lives in this recipe.
+    plist="$app/Contents/Info.plist"
+    cp "{{here}}/Info.plist" "$plist"
+    ver=$(awk -F'"' '/^\[workspace.package\]/{s=1} s&&/^version/{print $2; exit}' "{{repo}}/Cargo.toml")
+    plutil -replace CFBundleVersion -string "$ver" "$plist"
+    plutil -replace CFBundleShortVersionString -string "$ver" "$plist"
+    plutil -lint "$plist"
+
+    echo "built $app (v$ver)"
+    just _sign
+
+# Sign (and, in future, notarize/staple) the bundle — ONLY when a signing identity is
+# present; a silent no-op otherwise, so unsigned dev builds keep working. Set
+# CODESIGN_IDENTITY (e.g. "Developer ID Application: …") and optionally CODESIGN_ENTITLEMENTS
+# to enable. The seam that lets real signing drop in later without reshaping the build.
+_sign:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    app="{{app}}"
+    if [ -z "${CODESIGN_IDENTITY:-}" ]; then
+      echo "unsigned (set CODESIGN_IDENTITY to sign)"
+      exit 0
+    fi
+    echo "signing $app as $CODESIGN_IDENTITY"
+    codesign --force --deep --options runtime \
+      ${CODESIGN_ENTITLEMENTS:+--entitlements "$CODESIGN_ENTITLEMENTS"} \
+      --sign "$CODESIGN_IDENTITY" "$app"
+    # Future (needs an Apple notary profile):
+    #   xcrun notarytool submit "$app" --keychain-profile "$NOTARY_PROFILE" --wait
+    #   xcrun stapler staple "$app"

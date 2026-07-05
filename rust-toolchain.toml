@@ -1,0 +1,7 @@
+# Pins the Rust toolchain for reproducible builds — rustup honors this for every `cargo`
+# invocation (locally and in CI), so everyone builds with the same compiler + components.
+# Bump deliberately. SPDX/copyright is declared for this file in REUSE.toml.
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

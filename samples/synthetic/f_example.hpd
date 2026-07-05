@@ -1,0 +1,14 @@
+TargetModel	BCDx36HP
+FormatVersion	1.00
+Conventional			Alpha County Public Safety			Conventional								
+DQKs_Status		Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off
+C-Group			Regionwide		0.000000	0.000000	0	Rectangles		Global
+Rectangle		47.000000	-103.000000	44.000000	-98.000000
+C-Freq			Alpha Dispatch		154100000	NFM											
+Trunk			Example Statewide P25			P25Standard															
+DQKs_Status		Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off	Off
+Site			Central Site		45.500000	-100.500000	10.0				Circle								
+BandPlan_P25		851006250	6250	762006250	6250	851012500	12500	762006250	12500	935012500	12500	935012500	12500	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	3	3	0	3	0	0	0	0	0	0	0	0	0	0
+T-Freq				851012500				
+T-Group			Dispatch		45.500000	-100.500000	10.0	Circle	
+TGID			Police		101											

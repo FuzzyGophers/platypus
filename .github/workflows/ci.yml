@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# SPDX-FileCopyrightText: The Platypus Authors
+#
+# Two independent fronts, mirroring the local build system: the Rust engine (plain cargo +
+# the cbindgen header gate) and the macOS app (driven by `just`). See the root + app justfiles.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-gate:
+    name: Rust engine — gate + license + links + header
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the pinned channel + components from rust-toolchain.toml (single source).
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --all-features
+
+      - name: REUSE compliance
+        uses: fsfe/reuse-action@v5
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: link check (offline)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --no-progress "**/*.md"
+          fail: true
+
+      # The C ABI header is a cbindgen product; fail if the committed copy is stale.
+      - name: install cbindgen
+        run: cargo install cbindgen --locked
+      - name: C header is up to date
+        run: |
+          cbindgen --config crates/platypus-ffi/cbindgen.toml \
+            --output crates/platypus-ffi/include/platypus.h crates/platypus-ffi
+          git diff --exit-code -- crates/platypus-ffi/include/platypus.h
+
+  mac-build:
+    name: macOS app — build + smoke
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the pinned channel from rust-toolchain.toml (single source).
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: extractions/setup-just@v2
+
+      # Build the release FFI staticlib + the Swift app, run the Swift unit tests, and the
+      # headless Swift -> FFI -> core smoke against the synthetic fixtures.
+      - name: Build app
+        run: just app::build
+      - name: Swift unit tests
+        run: just app::test
+      - name: Headless smoke
+        run: just app::smoke

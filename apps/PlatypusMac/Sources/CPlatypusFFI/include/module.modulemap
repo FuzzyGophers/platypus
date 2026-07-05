@@ -1,0 +1,4 @@
+module CPlatypusFFI {
+    header "platypus.h"
+    export *
+}

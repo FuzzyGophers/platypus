@@ -1,0 +1,42 @@
+# Design (claude.ai/design sync workspace — local authoring dir, not shipped)
+/design-kit/
+
+# Editor / tooling local state
+/.claude/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Radio / card data — real device dumps: SDS150 card files (.hpd/.cfg/.avd) and FT-60 clone
+# images (.img). Real device memory carries the owner's location, so it is NEVER committed
+# (privacy rule); only the synthetic fixtures under samples/synthetic/ are tracked. The
+# round-trip test walks samples/ including any local real dumps.
+*.avd
+*.cfg
+*.hpd
+*.img
+!/samples/synthetic/*.cfg
+!/samples/synthetic/*.hpd
+
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Swift
+/apps/PlatypusMac/.build
+# Generated: `just app::build` copies the canonical crates/platypus-ffi/include/platypus.h
+# here (single source of truth), so the app copy is not committed.
+/apps/PlatypusMac/Sources/CPlatypusFFI/include/platypus.h
+# Generated app bundle + icon (`just app::bundle` rebuilds them from assets/icon.jpg)
+/apps/PlatypusMac/Platypus.app
+/apps/PlatypusMac/AppIcon.icns
+/apps/PlatypusMac/AppIcon.iconset
+# Third-party data-source marks (their trademarks) — fetched at bundle time, not committed
+# to this GPL repo. `just app::bundle` downloads them if missing; the UI falls back to a
+# text badge when absent.
+/apps/PlatypusMac/Resources/*.png

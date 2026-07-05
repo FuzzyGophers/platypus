@@ -1,0 +1,33 @@
+TargetModel	BCDx36HP
+FormatVersion	1.00
+Conventional	CountyId=9001	StateId=90	Alpha County Public Safety			Conventional								
+AreaState	CountyId=9001	StateId=90
+AreaCounty	CountyId=9001	CountyId=9001
+C-Group	CGroupId=8001	CountyId=9001	Alpha Fire		45.000000	-100.000000	5.0	Circle		Global
+C-Freq	CFreqId=7001	CGroupId=8001	Alpha Dispatch		154100000	NFM	TONE=C156.7	3									
+Conventional	AgencyId=9101	StateId=90	Regional Transit			Conventional								
+AreaState	AgencyId=9101	StateId=90
+AreaCounty	AgencyId=9101	CountyId=9002
+C-Group	CGroupId=8002	AgencyId=9101	Transit Ops		46.000000	-101.000000	8.0	Circle		Global
+C-Freq	CFreqId=7002	CGroupId=8002	Transit Net		453200000	NFM		22									
+Trunk	TrunkId=9201	StateId=90	Example Statewide P25			P25Standard															
+AreaState	TrunkId=9201	StateId=90
+AreaCounty	TrunkId=9201	CountyId=9001
+AreaCounty	TrunkId=9201	CountyId=9003
+Site	SiteId=8201	TrunkId=9201	Central Site		45.500000	-100.500000	10.0				Circle								
+T-Freq	TFreqId=6001	SiteId=8201		851012500				
+Site	SiteId=8202	TrunkId=9201	Far Site		48.000000	-110.000000	10.0				Circle								
+T-Freq	TFreqId=6002	SiteId=8202		851025000				
+T-Group	TGroupId=8301	TrunkId=9201	Dispatch		45.500000	-100.500000	10.0	Circle	
+TGID	Tid=5001	TGroupId=8301	Police		101	DIGITAL	2									
+T-Group	TGroupId=8302	TrunkId=9201	Regionwide		0.000000	0.000000	0	Rectangles	
+Rectangle		47.000000	-103.000000	44.000000	-98.000000
+Rectangle		44.000000	-103.000000	43.000000	-99.000000
+TGID	Tid=5002	TGroupId=8302	Regional		102	ANALOG	8									
+Trunk	TrunkId=9202	StateId=90	Example Business Radio			MotoTrbo															
+AreaState	TrunkId=9202	StateId=90
+AreaCounty	TrunkId=9202	CountyId=9002
+Site	SiteId=8203	TrunkId=9202	Business Site		46.000000	-101.000000	3.0				Circle								
+T-Freq	TFreqId=6003	SiteId=8203		461000000				
+T-Group	TGroupId=8303	TrunkId=9202	Ops		46.000000	-101.000000	3.0	Circle	
+TGID	Tid=5003	TGroupId=8303	Channel 1		1											

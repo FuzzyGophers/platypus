@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 The Platypus Authors
+[package]
+name = "platypus-ffi"
+version.workspace = true
+edition = "2021"
+description = "C ABI bridge over platypus-core, for the SwiftUI macOS app (and other non-Rust front-ends)."
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "platypus_ffi"
+# staticlib: linked directly into the macOS app. cdylib: handy for quick loading/tests.
+crate-type = ["staticlib", "cdylib"]
+
+# Results cross the boundary as JSON strings, built by hand (no serde). The one non-core
+# dep is `platypus-serial` (our termios transport) so the FT-60 clone read can be driven
+# from the app; the core itself stays dependency-free.
+[dependencies]
+platypus-core = { path = "../platypus-core", version = "0.1.0" }
+platypus-serial = { path = "../platypus-serial", version = "0.1.0" }
