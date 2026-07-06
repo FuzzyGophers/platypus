@@ -18,6 +18,26 @@ pub enum Error {
     /// core, was invoked here (e.g. the RadioReference SOAP fetch — the core only
     /// maps already-fetched RR types into the canonical model). Carries a hint.
     NotInCore(&'static str),
+    /// A requested operation isn't supported for the active model (e.g. a model
+    /// with no F-List format). Carries a static hint.
+    Unsupported(&'static str),
+    /// A filesystem/IO failure from a card read/write path. We keep the
+    /// [`std::io::ErrorKind`] plus the rendered message (rather than the
+    /// non-`Clone`/`Eq` [`std::io::Error`]) so this type stays `Clone`/`Eq` and
+    /// callers can still branch on the kind (e.g. `NotFound`).
+    Io {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io {
+            kind: e.kind(),
+            message: e.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -33,6 +53,11 @@ impl fmt::Display for Error {
             Error::NotInCore(hint) => {
                 write!(f, "operation not available in platypus-core: {hint}")
             }
+            Error::Unsupported(hint) => {
+                write!(f, "operation not supported for this model: {hint}")
+            }
+            // Delegate to the captured io message so user-facing text is unchanged.
+            Error::Io { message, .. } => write!(f, "{message}"),
         }
     }
 }
