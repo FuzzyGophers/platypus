@@ -124,3 +124,20 @@ final class SdCardSubtitleTests: XCTestCase {
             "card · 0 lists · backup folder")
     }
 }
+
+/// The map's radius→camera-span framing math (shared by the ZIP jump and "center on me").
+final class MapFramingTests: XCTestCase {
+    func testSpanScalesWithRadius() {
+        // ~1° lat ≈ 69 mi; 25 mi → 25·2.6/69 ≈ 0.942°.
+        XCTAssertEqual(MapLensView.frameSpanDegrees(radiusMi: 25), 25 * 2.6 / 69.0, accuracy: 1e-9)
+        // A larger radius frames a wider span.
+        XCTAssertGreaterThan(
+            MapLensView.frameSpanDegrees(radiusMi: 80),
+            MapLensView.frameSpanDegrees(radiusMi: 25))
+    }
+
+    func testTinyRadiusIsFloored() {
+        // A very small radius clamps to the 0.15° floor so the map doesn't zoom in too far.
+        XCTAssertEqual(MapLensView.frameSpanDegrees(radiusMi: 1), 0.15, accuracy: 1e-9)
+    }
+}

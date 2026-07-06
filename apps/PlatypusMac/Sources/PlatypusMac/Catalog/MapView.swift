@@ -33,6 +33,9 @@ struct MapLensView: View {
     @State private var status = "Pan to your area, set a radius, then Load here."
     @State private var searchText = ""
     @State private var geocoding = false
+    /// True while a current-location fix is pending (drives the spinner + disables the button).
+    @State private var locating = false
+    @StateObject private var locator = LocationFinder()
     /// True once the user has done an initial "Load here"; afterward the lens re-queries
     /// live as the radius or the map viewport changes, so the pins track the ring.
     @State private var live = false
@@ -209,7 +212,7 @@ struct MapLensView: View {
             TextField("ZIP or place", text: $searchText)
                 .textFieldStyle(.plain).font(.system(size: 12)).frame(width: 148)
                 .onSubmit { jumpTo(searchText) }
-            if geocoding {
+            if geocoding || locating {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
             } else if !searchText.isEmpty {
                 Button { searchText = "" } label: {
@@ -217,6 +220,11 @@ struct MapLensView: View {
                 }
                 .buttonStyle(.plain).help("Clear")
             }
+            Divider().frame(height: 14)
+            Button(action: locateMe) {
+                Image(systemName: "location.fill").font(.system(size: 11)).foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain).help("Center on my location").disabled(locating)
         }
         .padding(.horizontal, 11).padding(.vertical, 7)
         .background(.regularMaterial)
@@ -275,16 +283,43 @@ struct MapLensView: View {
                     status = "Couldn't find “\(q)”. Try a ZIP, city, or address."
                     return
                 }
-                center = coord
-                // Frame the radius ring comfortably (~1° lat ≈ 69 mi).
-                let deg = max(0.15, radiusMi * 2.6 / 69.0)
-                camera = .region(
-                    MKCoordinateRegion(
-                        center: coord,
-                        span: MKCoordinateSpan(latitudeDelta: deg, longitudeDelta: deg)))
-                load()
+                recenter(on: coord)
             }
         }
+    }
+
+    /// Center the map on my current location (`CLLocationManager`, one-shot fix), then recenter
+    /// the ring + load — the same path as the ZIP/place jump.
+    private func locateMe() {
+        locating = true
+        status = "Finding your location…"
+        locator.locate { result in
+            locating = false
+            switch result {
+            case .success(let coord): recenter(on: coord)
+            case .failure(let err):
+                systems = []
+                status = err.localizedDescription
+            }
+        }
+    }
+
+    /// Recenter the map + radius ring on `coord` and load the systems in range. Shared by the
+    /// ZIP/place search and the "center on me" button.
+    private func recenter(on coord: CLLocationCoordinate2D) {
+        center = coord
+        let deg = Self.frameSpanDegrees(radiusMi: radiusMi)
+        camera = .region(
+            MKCoordinateRegion(
+                center: coord,
+                span: MKCoordinateSpan(latitudeDelta: deg, longitudeDelta: deg)))
+        load()
+    }
+
+    /// Latitude/longitude span (degrees) that frames a radius ring comfortably (~1° lat ≈ 69 mi).
+    /// Floored so a tiny radius doesn't zoom in too far. Pure, so it's unit-testable.
+    static func frameSpanDegrees(radiusMi: Double) -> Double {
+        max(0.15, radiusMi * 2.6 / 69.0)
     }
 
     /// Stage the whole in-range area for confirmation.
@@ -297,5 +332,63 @@ struct MapLensView: View {
     private func commit() {
         for sys in systems { onAdd(sys.id, center.latitude, center.longitude, radiusMi) }
         pendingArea = nil
+    }
+}
+
+/// One-shot current-location helper behind the map's "center on me" button. `CLLocationManager`
+/// needs an `NSObject` delegate, so this wraps it and hands the resolved coordinate (or an error)
+/// to a single completion. Requests when-in-use authorization on first use; the app is
+/// unsandboxed, so no entitlement is needed — only `NSLocationWhenInUseUsageDescription` in
+/// `Info.plist`.
+final class LocationFinder: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var onFix: ((Result<CLLocationCoordinate2D, Error>) -> Void)?
+
+    enum LocateError: LocalizedError {
+        case denied
+        var errorDescription: String? {
+            "Location access is off. Enable it in System Settings › Privacy & Security › Location Services."
+        }
+    }
+
+    /// Request authorization (if needed) and a single location fix. `completion` runs on the main
+    /// thread with the coordinate or an error. A second call while one is pending replaces the
+    /// completion.
+    func locate(completion: @escaping (Result<CLLocationCoordinate2D, Error>) -> Void) {
+        onFix = completion
+        manager.delegate = self
+        if manager.authorizationStatus == .notDetermined {
+            manager.requestWhenInUseAuthorization()  // fix is requested on the auth callback
+        } else {
+            proceed(with: manager.authorizationStatus)
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        guard onFix != nil else { return }  // ignore the callback from just setting the delegate
+        proceed(with: manager.authorizationStatus)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let coord = locations.last?.coordinate else { return }
+        finish(.success(coord))
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        finish(.failure(error))
+    }
+
+    private func proceed(with status: CLAuthorizationStatus) {
+        switch status {
+        case .authorizedWhenInUse, .authorizedAlways: manager.requestLocation()
+        case .denied, .restricted: finish(.failure(LocateError.denied))
+        default: break  // notDetermined — still waiting on the prompt
+        }
+    }
+
+    private func finish(_ result: Result<CLLocationCoordinate2D, Error>) {
+        guard let cb = onFix else { return }
+        onFix = nil
+        DispatchQueue.main.async { cb(result) }
     }
 }
