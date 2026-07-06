@@ -54,6 +54,20 @@ enum BackupStore {
         return r
     }
 
+    /// The per-model backup folder, `<root>/<model>` — each radio's restore points grouped in
+    /// its own directory so the collection stays navigable as more radios are added.
+    static func modelRoot(_ model: String) -> URL {
+        let name = model.trimmingCharacters(in: .whitespaces)
+        return root.appendingPathComponent(name.isEmpty ? "Other" : name, isDirectory: true)
+    }
+
+    /// Ensure `<root>/<model>` exists, returning it.
+    static func ensureModelRoot(_ model: String) throws -> URL {
+        let r = modelRoot(model)
+        try FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+        return r
+    }
+
     // MARK: - Index
 
     static func load() -> [BackupRecord] {

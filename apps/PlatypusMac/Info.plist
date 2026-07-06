@@ -17,5 +17,7 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <!-- Shown when the map's "center on me" button requests a one-shot location fix. -->
+    <key>NSLocationWhenInUseUsageDescription</key><string>Platypus uses your location to center the map on where you are, so nearby systems and repeaters land in range.</string>
 </dict>
 </plist>

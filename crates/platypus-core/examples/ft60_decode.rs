@@ -11,6 +11,9 @@ fn tone_str(t: &Tone) -> String {
         Tone::None => "—".to_string(),
         Tone::Ctcss(hz10) => format!("CTCSS {:.1}", *hz10 as f64 / 10.0),
         Tone::Dcs(code) => format!("DCS {code:03}"),
+        Tone::Cross { ctcss, dcs } => {
+            format!("CTCSS {:.1} · DCS {dcs:03}", *ctcss as f64 / 10.0)
+        }
     }
 }
 

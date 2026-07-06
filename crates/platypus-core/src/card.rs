@@ -89,15 +89,14 @@ fn parse_qk(field: Option<&str>) -> Option<u32> {
 pub fn read_favorites_lists(
     card_mount: &Path,
     profile: &dyn SdCardProfile,
-) -> io::Result<Vec<FavoriteListInfo>> {
+) -> crate::Result<Vec<FavoriteListInfo>> {
     let cfg = f_list_path(card_mount, profile);
     let bytes = match fs::read(&cfg) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
-    let doc = Document::parse(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let doc = Document::parse(&bytes)?;
 
     let mut out = Vec::new();
     for line in &doc.lines {
@@ -149,12 +148,12 @@ pub fn delete_favorites_slot(
     card_mount: &Path,
     profile: &dyn SdCardProfile,
     slot: u32,
-) -> io::Result<()> {
+) -> crate::Result<()> {
     let fav = favorites_path(card_mount, profile, slot);
     match fs::remove_file(&fav) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     }
 
     let path = f_list_path(card_mount, profile);
@@ -173,15 +172,14 @@ pub fn delete_favorites_slot(
 /// the scanner shows them) — the sort Sentinel never let you do. Header and any
 /// non-`F-List` lines are preserved; deletes `app_data.cfg` (program data changed).
 /// The caller must still **eject**.
-pub fn sort_favorites_lists(card_mount: &Path, profile: &dyn SdCardProfile) -> io::Result<()> {
+pub fn sort_favorites_lists(card_mount: &Path, profile: &dyn SdCardProfile) -> crate::Result<()> {
     let path = f_list_path(card_mount, profile);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
-    let doc = Document::parse(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let doc = Document::parse(&bytes)?;
 
     let (mut entries, others): (Vec<Line>, Vec<Line>) =
         doc.lines.into_iter().partition(|l| l.command() == "F-List");
@@ -200,15 +198,14 @@ pub fn reorder_favorites_lists(
     card_mount: &Path,
     profile: &dyn SdCardProfile,
     slots: &[u32],
-) -> io::Result<()> {
+) -> crate::Result<()> {
     let path = f_list_path(card_mount, profile);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
-    let doc = Document::parse(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let doc = Document::parse(&bytes)?;
 
     let (mut entries, others): (Vec<Line>, Vec<Line>) =
         doc.lines.into_iter().partition(|l| l.command() == "F-List");
@@ -289,7 +286,7 @@ pub fn commit_favorites(
     slot: u32,
     label: &str,
     favorites: &Document,
-) -> io::Result<()> {
+) -> crate::Result<()> {
     write_favorites_slot(card_mount, profile, slot, favorites)?;
     update_f_list(card_mount, profile, slot, label)?;
     delete_app_data(card_mount, profile)?;
@@ -305,7 +302,7 @@ pub fn write_favorites_slot(
     profile: &dyn SdCardProfile,
     slot: u32,
     favorites: &Document,
-) -> io::Result<()> {
+) -> crate::Result<()> {
     let fav_path = favorites_path(card_mount, profile, slot);
     if let Some(dir) = fav_path.parent() {
         fs::create_dir_all(dir)?;
@@ -330,7 +327,7 @@ pub fn apply_favorites_layout(
     card_mount: &Path,
     profile: &dyn SdCardProfile,
     lists: &[ListLayout],
-) -> io::Result<()> {
+) -> crate::Result<()> {
     let keep: std::collections::BTreeSet<u32> = lists.iter().map(|l| l.slot).collect();
 
     // Parse the existing index once: used both to delete dropped slot files and to
@@ -348,7 +345,7 @@ pub fn apply_favorites_layout(
                     match fs::remove_file(favorites_path(card_mount, profile, slot)) {
                         Ok(()) => {}
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(e),
+                        Err(e) => return Err(e.into()),
                     }
                 }
             }
@@ -371,9 +368,7 @@ pub fn apply_favorites_layout(
                 f
             })
             .or_else(|| profile.f_list_entry(&list.name, &filename))
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Unsupported, "model has no F-List format")
-            })?;
+            .ok_or(crate::Error::Unsupported("model has no F-List format"))?;
         // Apply per-field overrides where requested and the model exposes the field.
         let set = |fields: &mut Vec<String>, col: Option<usize>, val: String| {
             if let Some(i) = col {
@@ -421,11 +416,12 @@ fn f_list_fields_for(doc: &Document, filename: &str) -> Option<Vec<String>> {
 /// they can be lost (or left half-written, corrupting the FAT) if the card is
 /// pulled / mass-storage mode is exited without ejecting. `fsync` flushes this
 /// file; the caller must still **eject** the volume before disconnecting.
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_synced(path: &Path, bytes: &[u8]) -> crate::Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(path)?;
     f.write_all(bytes)?;
-    f.sync_all()
+    f.sync_all()?;
+    Ok(())
 }
 
 /// Add or replace the `F-List` entry for `slot` in `f_list.cfg`, preserving the
@@ -435,15 +431,14 @@ pub fn update_f_list(
     profile: &dyn SdCardProfile,
     slot: u32,
     label: &str,
-) -> io::Result<()> {
+) -> crate::Result<()> {
     let path = f_list_path(card_mount, profile);
     let filename = format!("f_{slot:06}.hpd");
 
     let mut doc = match fs::read(&path) {
-        Ok(bytes) => Document::parse(&bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
+        Ok(bytes) => Document::parse(&bytes)?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => new_index_doc(profile),
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
 
     match doc
@@ -460,9 +455,9 @@ pub fn update_f_list(
         }
         // New list: synthesize the default block.
         None => {
-            let fields = profile.f_list_entry(label, &filename).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Unsupported, "model has no F-List format")
-            })?;
+            let fields = profile
+                .f_list_entry(label, &filename)
+                .ok_or(crate::Error::Unsupported("model has no F-List format"))?;
             doc.lines.push(Line {
                 fields,
                 ending: LineEnding::Crlf,
@@ -495,12 +490,12 @@ fn new_index_doc(profile: &dyn SdCardProfile) -> Document {
 /// delete `app_data.cfg`, or the scanner misbehaves on resume. Idempotent: a
 /// missing file is success, so this is safe to call as the final step of every
 /// write path.
-pub fn delete_app_data(card_mount: &Path, profile: &dyn SdCardProfile) -> io::Result<()> {
+pub fn delete_app_data(card_mount: &Path, profile: &dyn SdCardProfile) -> crate::Result<()> {
     let path = app_data_path(card_mount, profile);
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -862,9 +857,11 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_f_list_surfaces_invalid_data() {
+    fn corrupt_f_list_surfaces_parse_error() {
         // A non-round-tripping f_list.cfg (a byte the ASCII contract forbids) must
-        // surface as InvalidData, not be silently accepted as an empty list.
+        // surface the parse error, not be silently accepted as an empty list. With
+        // the unified error type the real `NonAscii` now propagates (previously it
+        // was flattened into an io::ErrorKind::InvalidData).
         let p = Sds150::new();
         let base = std::env::temp_dir().join(format!("platypus-corrupt-{}", std::process::id()));
         let dir = f_list_path(&base, &p).parent().unwrap().to_path_buf();
@@ -873,7 +870,10 @@ mod tests {
         fs::write(f_list_path(&base, &p), b"F-List\t\xFF\r\n").unwrap();
 
         let err = read_favorites_lists(&base, &p).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            matches!(err, crate::Error::NonAscii { byte: 0xFF, .. }),
+            "expected NonAscii, got {err:?}"
+        );
 
         fs::remove_dir_all(&base).ok();
     }

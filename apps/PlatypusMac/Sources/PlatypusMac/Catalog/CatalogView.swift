@@ -2,6 +2,7 @@
 // Copyright (C) 2026 The Platypus Authors
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Country→State→County name masters (`hpdb.cfg`), loadable off the main thread.
 struct Masters {
@@ -107,6 +108,10 @@ struct CatalogView: View {
     @State private var selectedNationwideGroup: NationwideGroup?
 
     @State private var libraryDir: String?
+    /// A dedicated map data source (an added HPDB folder), independent of the editor `library`
+    /// and the target radio — so you can map one dataset while writing to a different radio.
+    @State private var mapLibrary: ScannerLibrary?
+    @State private var mapDir: String?
     @State private var lens: Lens = .list
     @State private var detectedCards: [DetectedCard] = []
     @State private var showingCardPicker = false
@@ -195,6 +200,12 @@ struct CatalogView: View {
 
     /// The active radio's device class (nil = neutral, no radio chosen).
     private var activeClass: RadioClass? { radios.active?.deviceClass }
+    /// The library the map reads from: an enabled HPDB source if one's added, else the editor
+    /// library (so opening an SD card still shows on the map). Independent of the target radio.
+    private var mapSourceLibrary: ScannerLibrary? {
+        if dataSources.source(.hpdb)?.enabled == true, let mapLibrary { return mapLibrary }
+        return library
+    }
     /// A clone-image (memory) radio is active — the flat editor + conventional-only browse.
     private var cloneActive: Bool { activeClass == .cloneImage }
     /// Browse is limited to conventional systems for the active radio's class.
@@ -285,10 +296,14 @@ struct CatalogView: View {
                 Divider().overlay(Theme.border)
                 Group {
                     if lens == .map {
-                        MapLensView(library: library, filter: filter, canAdd: canAdd,
-                                    conventionalOnly: conventionalOnly,
-                                    listName: cloneActive ? radios.active?.name : selectedList?.name) { id, lat, lon, miles in
-                            addSystemRadiusToSelected(id, lat: lat, lon: lon, miles: miles)
+                        if mapSourceLibrary == nil {
+                            mapEmptyState
+                        } else {
+                            MapLensView(library: mapSourceLibrary, filter: filter, canAdd: canAdd,
+                                        conventionalOnly: conventionalOnly,
+                                        listName: cloneActive ? radios.active?.name : selectedList?.name) { id, lat, lon, miles in
+                                addSystemRadiusToSelected(id, lat: lat, lon: lon, miles: miles)
+                            }
                         }
                     } else {
                         catalog
@@ -302,6 +317,8 @@ struct CatalogView: View {
                         if let ft60 {
                             FT60EditorView(
                                 memory: ft60, radioName: radios.active?.name ?? "Radio",
+                                symbol: radios.active?.symbol ?? "dot.radiowaves.left.and.right",
+                                accent: radios.active?.accent ?? Theme.accent,
                                 selectedBank: $ft60Bank,
                                 onRead: { showingFt60Read = true },
                                 onWrite: {
@@ -310,7 +327,8 @@ struct CatalogView: View {
                                     } else {
                                         status = "Read the radio first — Write sends back the captured image."
                                     }
-                                })
+                                },
+                                onOpenBackup: openFt60Backup)
                         }
                     case .sdCard:
                         editorColumn
@@ -350,13 +368,11 @@ struct CatalogView: View {
         .onAppear {
             // Reconcile the clone-image data with the restored active radio (if any).
             syncActiveRadio()
+            // No card is auto-detected/opened on launch — the user opens and reads on demand from
+            // the editor's action bar (Read / Open Backup). `PLATYPUS_LIBRARY` stays as an explicit
+            // env override for dev/testing.
             if library == nil, let p = ProcessInfo.processInfo.environment["PLATYPUS_LIBRARY"] {
                 openLibrary(path: p, title: ScannerCard.isLiveCard(hpdbDir: p) ? "Loading the card" : "Loading the database")
-            } else if library == nil {
-                // Auto-open a connected card on launch, if exactly one is present.
-                let cards = ScannerCard.detect()
-                if cards.count == 1 { openLibrary(path: cards[0].hpdbDir, title: "Loading the card") }
-                else if cards.count > 1 { status = "\(cards.count) cards connected — use Open Card." }
             }
         }
     }
@@ -471,9 +487,6 @@ struct CatalogView: View {
             Button { showingManageRadios = true } label: {
                 Label("Manage radios…", systemImage: "slider.horizontal.3")
             }
-            Divider()
-            Button { openCard() } label: { Label("Open Card", systemImage: "sdcard") }
-            Button { openFolder() } label: { Label("Open library / backup…", systemImage: "folder") }
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: radios.active?.symbol ?? "dot.radiowaves.left.and.right")
@@ -506,6 +519,10 @@ struct CatalogView: View {
     private func readFT60(port: String) {
         let radioName = radios.active?.name ?? "radio"
         guard let capacity = radios.active?.capacity else { return }
+        // Every Read leaves a restore point: the raw image is backed up (Rust-side, fsync'd) to
+        // the radio's own folder (<backups>/<model>/) before the data is surfaced.
+        let backupDir = BackupStore.modelRoot(radioName).path
+        let backupStem = "\(radioName) \(Self.timestamp())"
         let token = CardBackup.CancelToken()
         opTitle = "Reading \(radioName)"
         opIcon = "antenna.radiowaves.left.and.right"
@@ -517,7 +534,7 @@ struct CatalogView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let result = try Ft60.read(
-                    port: port,
+                    port: port, backupDir: backupDir, backupStem: backupStem,
                     progress: { frac in
                         DispatchQueue.main.async { opPhase = "Reading"; opFraction = frac }
                     },
@@ -525,10 +542,17 @@ struct CatalogView: View {
                 DispatchQueue.main.async {
                     ft60 = FT60Memory(
                         capacity: capacity, channels: result.channels, image: result.image,
-                        pms: result.pms)
+                        pms: result.pms, settings: result.settings)
                     ft60Bank = nil
                     opActive = false
-                    status = "\(radioName): read \(result.channels.count) channels from the radio."
+                    let base = "\(radioName): read \(result.channels.count) channels"
+                    if let be = result.backupError {
+                        status = "\(base) — ⚠︎ backup failed: \(be)"
+                    } else if let bp = result.backupPath {
+                        status = "\(base) · backed up to \((bp as NSString).lastPathComponent)."
+                    } else {
+                        status = "\(base) from the radio."
+                    }
                     refresh()
                 }
             } catch {
@@ -545,13 +569,15 @@ struct CatalogView: View {
     /// partial/failed transfer can't corrupt the radio. No cancel token surfaced mid-write —
     /// like a card write, it must not be interrupted (the sheet's confirmation is the gate).
     private func writeFT60(port: String) {
+        let radioName = radios.active?.name ?? "radio"
         guard let ft60, ft60.canWrite else {
             status = "Read the radio first — Write sends back the captured image."
             return
         }
-        let radioName = radios.active?.name ?? "radio"
         let base = ft60.image
         let channels = ft60.channels
+        let pms = ft60.pms
+        let settings = ft60.settings
         let count = ft60.count(inBank: nil)
         opTitle = "Writing \(radioName)"
         opIcon = "square.and.arrow.up.on.square"
@@ -565,6 +591,8 @@ struct CatalogView: View {
                 try Ft60.write(
                     port: port,
                     channels: channels,
+                    pms: pms,
+                    settings: settings,
                     baseImage: base,
                     progress: { frac in
                         DispatchQueue.main.async { opPhase = "Writing"; opFraction = frac }
@@ -583,6 +611,35 @@ struct CatalogView: View {
         }
     }
 
+    /// Open a saved FT-60 backup **into the editor** (editable), defaulting the picker to this
+    /// radio's backups folder. The raw image becomes the base memory; the decoded channels/PMS/
+    /// settings are editable, and Write clones the (possibly edited) image out.
+    private func openFt60Backup() {
+        let radioName = radios.active?.name ?? "radio"
+        guard let capacity = radios.active?.capacity else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "img") ?? .data]
+        panel.directoryURL = BackupStore.modelRoot(radioName)
+        panel.prompt = "Open Backup"
+        panel.message = "Open an \(radioName) backup image to edit, then Write."
+        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url)
+        else { return }
+        let bytes = [UInt8](data)
+        do {
+            let loaded = try Ft60.load(image: bytes)
+            ft60 = FT60Memory(
+                capacity: capacity, channels: loaded.channels, image: bytes,
+                pms: loaded.pms, settings: loaded.settings)
+            ft60Bank = nil
+            status = "\(radioName): opened backup \(url.lastPathComponent) — edit, then Write."
+            refresh()
+        } catch {
+            status = "Couldn't open backup: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Data sources (browse) — merge model, separate from the target radio
 
     /// Top dropdown listing the browse data sources. Enabled+configured sources merge into
@@ -591,17 +648,21 @@ struct CatalogView: View {
         Menu {
             Section("Data sources") {
                 ForEach(dataSources.addedSources) { src in
-                    Button { dataSources.toggle(src.kind) } label: {
+                    Button { toggleSource(src.kind) } label: {
                         Label("\(src.kind.name) — \(src.statusText)",
                               systemImage: src.enabled ? "checkmark.circle.fill" : "circle")
                     }
                 }
             }
+            if dataSources.source(.hpdb)?.added == true {
+                Divider()
+                Button("Change HPDB folder…") { openMapSource() }
+            }
             if !dataSources.addableKinds.isEmpty {
                 Divider()
                 Menu("Add a source…") {
                     ForEach(dataSources.addableKinds) { kind in
-                        Button(kind.name) { addingSource = kind }
+                        Button(kind.name) { kind == .hpdb ? openMapSource() : (addingSource = kind) }
                     }
                 }
             }
@@ -609,11 +670,39 @@ struct CatalogView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "square.stack.3d.up")
-                Text("Sources (\(dataSources.activeCount))").font(.system(size: 12, weight: .medium))
+                Text("Sources").font(.system(size: 12, weight: .medium))
             }
         }
         .menuStyle(.borderlessButton).fixedSize()
         .help("Data sources that merge into browse (separate from the target radio).")
+    }
+
+    /// Shown in the map lens when no data source is loaded — a discoverable way to open an HPDB
+    /// folder (mirrors the editor action bars).
+    private var mapEmptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "map").font(.system(size: 34)).foregroundStyle(Theme.fg3)
+            Text("No map source").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.fg)
+            Text("Open a Sentinel HPDB folder to plot systems by location.")
+                .font(.system(size: 11)).foregroundStyle(Theme.fg3)
+                .multilineTextAlignment(.center)
+            Button { openMapSource() } label: {
+                Label("Open an HPDB folder", systemImage: "folder")
+            }.controlSize(.large)
+        }
+        .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bg)
+    }
+
+    /// Toggle a source on/off. HPDB drives the map handle (falls back to the editor library when
+    /// off); the external stubs just flip their enabled flag.
+    private func toggleSource(_ kind: DataSourceKind) {
+        if kind == .hpdb {
+            let on = dataSources.source(.hpdb)?.enabled ?? false
+            dataSources.setHpdb(enabled: !on)
+        } else {
+            dataSources.toggle(kind)
+        }
     }
 
     /// A small provenance chip (tinted dot + short label), reusable in details footers/rows.
@@ -634,7 +723,7 @@ struct CatalogView: View {
             Picker("", selection: $lens) {
                 ForEach(Lens.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
-            .pickerStyle(.segmented).fixedSize().disabled(library == nil)
+            .pickerStyle(.segmented).fixedSize().disabled(mapSourceLibrary == nil)
             Spacer()
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.fg3)
@@ -657,37 +746,6 @@ struct CatalogView: View {
                     + (n > 0 ? " · \(n) ch" : ""), systemImage: radio.symbol)
                     .font(.system(size: 10.5)).foregroundStyle(Theme.fg3)
                     .help("Read/Write the radio over the serial clone cable from the editor.")
-            } else if cardMount != nil {
-                if cardInfo != nil {
-                    if isLiveCard {
-                        Label("Live card", systemImage: "dot.radiowaves.left.and.right")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Color(hex: 0x34c759))
-                            .help("A connected scanner card is loaded (writes affect the radio).")
-                    } else {
-                        Label("Backup folder", systemImage: "folder")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(Theme.fg3)
-                            .help("A backup/library folder is loaded — not the live card.")
-                    }
-                }
-                if cardModified {
-                    Text("modified — eject before reconnecting")
-                        .font(.system(size: 10.5)).foregroundStyle(Theme.warn)
-                }
-                Button(action: backUpCard) { Label("Back Up", systemImage: "externaldrive.badge.timemachine") }
-                    .help("Save a full, verified backup of the card to the managed backups folder.")
-                Button(action: restoreCard) { Label("Restore", systemImage: "arrow.uturn.backward") }
-                    .help("Overwrite the card from a previous backup folder, then verify.")
-                Button(action: ejectCard) { Label("Eject", systemImage: "eject") }
-                    .tint(cardModified ? Theme.warn : nil)
-                    .help("Flush + eject the card. Always do this before reconnecting it to the scanner.")
-                Menu {
-                    Button("Reveal Backups Folder") { revealBackupsFolder() }
-                    Button("Change Backups Location…") { changeBackupsLocation() }
-                } label: { Image(systemName: "ellipsis.circle") }
-                .menuStyle(.borderlessButton).fixedSize()
-                .help("Manage where backups are stored.")
             } else if let stats {
                 Text("\(stats.systems) systems · \(stats.channels) channels")
                     .font(.system(size: 11)).foregroundStyle(Theme.fg2)
@@ -723,11 +781,6 @@ struct CatalogView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 6)], alignment: .leading, spacing: 6) {
                         ForEach(TechFilter.allAlphabetical, id: \.self) { techPill($0) }
                     }
-                }
-                section("SHOW") {
-                    Toggle("Hide encrypted", isOn: $filter.hideEncrypted)
-                        .font(.system(size: 12))
-                        .onChange(of: filter.hideEncrypted) { refresh() }
                 }
                 Spacer(minLength: 0)
             }
@@ -1034,9 +1087,6 @@ struct CatalogView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(ch.name).font(.system(size: 12.5)).lineLimit(1)
-                    if ch.encrypted {
-                        Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(Theme.encrypted)
-                    }
                 }
                 Text(channelDetailLine(ch)).font(.system(size: 10.5)).foregroundStyle(Theme.fg3)
                     .lineLimit(1)
@@ -1060,7 +1110,6 @@ struct CatalogView: View {
         // Show the secondary identifier too (the column shows only one).
         if ch.tgid != nil, let f = ch.freqMHz { parts.append(f) }
         if let tg = ch.tgid, ch.freqHz != nil { parts.append("TG \(tg)") }
-        if ch.encrypted { parts.append("Encrypted") }
         return parts.joined(separator: "  ·  ")
     }
 
@@ -1087,6 +1136,8 @@ struct CatalogView: View {
 
     private var editorColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
+            sdCardHeaderBar
+            Divider().overlay(Theme.border)
             // Always-visible list selector so you can switch lists without going back.
             listBar.padding(14)
             Divider().overlay(Theme.border)
@@ -1123,6 +1174,97 @@ struct CatalogView: View {
             }
         }
         .background(Theme.bg2)
+    }
+
+    /// The SD-card editor's action bar — the same Read / Write / Open-Backup shape as the FT-60
+    /// header, with the card verbs (Read = mount, Write = save changes, Open Backup = a backup
+    /// folder). Always visible so loading + saving live in one consistent place per radio.
+    private var sdCardHeaderBar: some View {
+        RadioActionBar(
+            symbol: radios.active?.symbol ?? "sdcard",
+            accent: radios.active?.accent ?? Theme.accent,
+            name: radios.active?.name ?? "SDS150", subtitle: sdCardSubtitle,
+            warning: cardModified ? "modified — eject before reconnecting" : nil,
+            onOpen: openBackupCard, onRead: openCard, onWrite: { saveAll() },
+            writeDisabled: cardMount == nil || !anyPending || !cardBackedUp,
+            writeHelp: cardMount != nil && anyPending && !cardBackedUp
+                ? "Back up the card first, then Write" : "Save changes to the card",
+            onEject: ejectCard, ejectDisabled: cardMount == nil, ejectModified: cardModified,
+            menuItems: cardMenuItems)
+    }
+
+    /// The SD-card overflow (⋯) menu — card ops available when a card's loaded.
+    private var cardMenuItems: [RadioBarMenuItem] {
+        guard cardMount != nil else { return [] }
+        return [RadioBarMenuItem(title: "Restore…") { restoreCard() }]
+    }
+
+    /// Subtitle for the SD-card header: the card/volume + list count + live-vs-backup, or "no card".
+    private var sdCardSubtitle: String {
+        Self.sdCardSubtitle(
+            hasCard: cardMount != nil, volume: cardVolumeName,
+            lists: workingLists.count, isLive: isLiveCard)
+    }
+
+    /// Pure builder for the SD-card header subtitle (unit-tested).
+    static func sdCardSubtitle(hasCard: Bool, volume: String, lists: Int, isLive: Bool) -> String {
+        guard hasCard else { return "card · no card open" }
+        let name = volume.isEmpty ? "card" : volume
+        let origin = isLive ? "live card" : "backup folder"
+        return "\(name) · \(lists) list\(lists == 1 ? "" : "s") · \(origin)"
+    }
+
+    /// Open Backup (SD card): pick a saved card backup folder, defaulting to this model's backups.
+    private func openBackupCard() {
+        guard let url = pickHpdbFolder(startAt: radios.active?.name ?? cardInfo?.model ?? "") else { return }
+        let hpdb = ScannerCard.hpdbDir(volumeRoot: url.path) ?? url.path
+        openLibrary(path: hpdb, title: "Loading the backup")
+    }
+
+    /// Shared folder picker for an SD-card backup / HPDB directory (`s_*.hpd`), starting in the
+    /// given model's backups. Returns the picked URL, or nil if cancelled.
+    private func pickHpdbFolder(startAt model: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.directoryURL = BackupStore.modelRoot(model)
+        panel.prompt = "Open"
+        panel.message = "Choose a card backup or HPDB folder."
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// Add (or re-point) the HPDB **map source**: pick a folder of `s_*.hpd` files and open it on
+    /// a dedicated map handle — independent of the editor library and the target radio, so its
+    /// data feeds the map while you write to a different radio.
+    private func openMapSource() {
+        guard let url = pickHpdbFolder(startAt: radios.active?.name ?? "") else { return }
+        let hpdb = ScannerCard.hpdbDir(volumeRoot: url.path) ?? url.path
+        loading = true
+        loadTitle = "Loading the map source"
+        loadFraction = 0
+        loadPhase = "Reading files…"
+        status = ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            let progress: (UInt32, UInt32, UInt32) -> Void = { phase, done, total in
+                let frac = total > 0 ? Double(done) / Double(total) : 0
+                DispatchQueue.main.async {
+                    loadPhase = phase == 1 ? "Reading files…" : "Indexing coverage…"
+                    loadFraction = phase == 1 ? 0.5 * frac : 0.5 + 0.5 * frac
+                }
+            }
+            let lib = ScannerLibrary(directory: hpdb, progress: progress)
+            DispatchQueue.main.async {
+                loading = false
+                guard let lib else {
+                    status = "Could not read that folder."
+                    return
+                }
+                self.mapLibrary = lib
+                self.mapDir = hpdb
+                self.dataSources.addHpdb(folderPath: hpdb)
+                self.lens = .map
+            }
+        }
     }
 
     private var renameRow: some View {
@@ -1670,17 +1812,9 @@ struct CatalogView: View {
             }
             if anyPending {
                 Text("Pending: \(pendingSummary)").font(.system(size: 11)).foregroundStyle(Theme.fg2)
-                // Edits stage freely; saving them to the card requires a backup.
-                if cardBackedUp {
-                    Button(action: { saveAll() }) {
-                        Text("Save all changes").frame(maxWidth: .infinity).padding(.vertical, 8)
-                            .background(Theme.accent).foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: Theme.rField))
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    backupBanner
-                }
+                // Edits stage freely; saving them to the card requires a backup first. The Write
+                // button lives in the header (disabled until backed up); this is the backup CTA.
+                if !cardBackedUp { backupBanner }
             }
         }
     }
@@ -1694,7 +1828,7 @@ struct CatalogView: View {
             }
             Text("Your changes are staged but not written. Saving writes to the card — back up first (a full copy to a folder you pick), then Save.")
                 .font(.system(size: 10.5)).foregroundStyle(Theme.fg3).fixedSize(horizontal: false, vertical: true)
-            Button(action: backUpCard) {
+            Button { backUpCard() } label: {
                 Label("Back Up Card", systemImage: "externaldrive.badge.timemachine")
                     .frame(maxWidth: .infinity).padding(.vertical, 8)
                     .background(Theme.accent).foregroundStyle(.white)
@@ -1831,20 +1965,6 @@ struct CatalogView: View {
         }
     }
 
-    private func openFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.message = "Choose a card or backup folder (or the database directory of s_*.hpd files)."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        // A live card volume and a backup folder are card-shaped — the `s_*.hpd` files sit
-        // in a nested `<MODEL>/HPDB` dir, which is what the library opens from (and what
-        // `cardMount` is derived from). Resolve the selection to that dir; if the user
-        // instead picked the HPDB dir itself, `hpdbDir` returns nil and we use it unchanged.
-        let hpdb = ScannerCard.hpdbDir(volumeRoot: url.path) ?? url.path
-        openLibrary(path: hpdb, title: "Loading the library")
-    }
-
     /// Load a library off the main thread with a progress bar — the full-USA parse +
     /// coverage index would otherwise beachball the window.
     private func openLibrary(path: String, title: String = "Loading the database") {
@@ -1920,6 +2040,12 @@ struct CatalogView: View {
                         "Card browse data unchanged since backup — loaded instantly from your "
                             + "backup. Favorites read live from the card.",
                         level: .success)
+                }
+                // A live card was just read — back it up automatically (like the FT-60). We have
+                // the data in hand; a fresh verified backup is cheap insurance and satisfies the
+                // Write gate. Backup folders / map sources (not live) never trigger this.
+                if cardEval?.isLive == true {
+                    self.backUpCard(auto: true)
                 }
             }
         }
@@ -2109,8 +2235,10 @@ struct CatalogView: View {
     /// Add a map system's channels scoped to the map center + radius — only the
     /// departments near the point, not the whole (possibly statewide) system.
     private func addSystemRadiusToSelected(_ id: String, lat: Double, lon: Double, miles: Double) {
-        guard let library else { return }
-        addChannels(library.radiusChannels(systemID: id, lat: lat, lon: lon, miles: miles, filter))
+        // Expand from the library the map is actually showing (an added HPDB source, or the
+        // editor library) so pin ids resolve; a clone radio rebuilds channels self-contained.
+        guard let src = mapSourceLibrary else { return }
+        addChannels(src.radiusChannels(systemID: id, lat: lat, lon: lon, miles: miles, filter))
     }
 
     /// Route a set of catalog channels to the active target: a clone-image radio's memory
@@ -2430,17 +2558,19 @@ struct CatalogView: View {
 
     // MARK: - Card backup / eject (header)
 
-    private func backUpCard() {
+    /// Back up the card to the managed backups folder. `auto` is the quiet variant fired on Read
+    /// (no Finder reveal, gentler success flash), mirroring the FT-60's auto-backup on read.
+    private func backUpCard(auto: Bool = false) {
         guard let mount = cardMount else { return }
+        let model = cardInfo?.model ?? "Scanner"
         let parent: URL
         do {
-            parent = try BackupStore.ensureRoot()
+            parent = try BackupStore.ensureModelRoot(model)
         } catch {
             cardStatus = CardBanner(text: "Backup failed: \(error.localizedDescription)", level: .error)
             return
         }
         let stamp = Self.timestamp()
-        let model = cardInfo?.model ?? "Scanner"
         let volumeName =
             cardVolumeName.isEmpty ? (CardVolume.forFile(mount)?.name ?? "") : cardVolumeName
         let token = CardBackup.CancelToken()
@@ -2481,11 +2611,17 @@ struct CatalogView: View {
                     opActive = false
                     BackupStore.append(record)
                     cardBackedUp = true
-                    flashStatus(
-                        "Backed up to \(r.folder.lastPathComponent) — "
-                            + "\(r.filesVerified) files verified. Up to date; editing enabled.",
-                        level: .success)
-                    NSWorkspace.shared.activateFileViewerSelecting([r.folder])
+                    if auto {
+                        flashStatus(
+                            "Backed up to \(r.folder.lastPathComponent) — "
+                                + "\(r.filesVerified) files verified.", level: .success)
+                    } else {
+                        flashStatus(
+                            "Backed up to \(r.folder.lastPathComponent) — "
+                                + "\(r.filesVerified) files verified. Up to date; editing enabled.",
+                            level: .success)
+                        NSWorkspace.shared.activateFileViewerSelecting([r.folder])
+                    }
                 }
             } catch {
                 let isCancel = (error as NSError).code == NSUserCancelledError
@@ -2500,23 +2636,6 @@ struct CatalogView: View {
                 }
             }
         }
-    }
-
-    private func revealBackupsFolder() {
-        let root = (try? BackupStore.ensureRoot()) ?? BackupStore.root
-        NSWorkspace.shared.activateFileViewerSelecting([root])
-    }
-
-    private func changeBackupsLocation() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.prompt = "Use This Folder"
-        panel.message = "Choose where Platypus stores card backups."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        BackupStore.setRoot(url)
-        flashStatus("Backups will be saved to \(url.lastPathComponent).", level: .info)
     }
 
     private func restoreCard() {

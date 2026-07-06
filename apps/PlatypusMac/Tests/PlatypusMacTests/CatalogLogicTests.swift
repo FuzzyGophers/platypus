@@ -60,3 +60,67 @@ final class ServiceTypeTests: XCTestCase {
         XCTAssertEqual(Country.name(99), "Country 99")
     }
 }
+
+/// `DataSourceStore` — HPDB is a folder-picked source, not a default, and drives the map count.
+final class DataSourceStoreTests: XCTestCase {
+    func testNothingAddedByDefault() {
+        let store = DataSourceStore()
+        XCTAssertEqual(store.source(.hpdb)?.added, false)
+        XCTAssertEqual(store.activeCount, 0)               // no default source
+        XCTAssertNil(store.source(.hpdb)?.folderPath)
+        XCTAssertEqual(store.source(.hpdb)?.configured, false)
+    }
+
+    func testHpdbIsAddableUntilAdded() {
+        let store = DataSourceStore()
+        XCTAssertTrue(store.addableKinds.contains(.hpdb))   // offered in "Add a source…"
+        store.addHpdb(folderPath: "/tmp/MyCard/HPDB")
+        XCTAssertFalse(store.addableKinds.contains(.hpdb))  // gone once added
+    }
+
+    func testAddHpdbConfiguresAndEnables() {
+        let store = DataSourceStore()
+        store.addHpdb(folderPath: "/tmp/MyCard/HPDB")
+        let hpdb = store.source(.hpdb)
+        XCTAssertEqual(hpdb?.added, true)
+        XCTAssertEqual(hpdb?.enabled, true)
+        XCTAssertEqual(hpdb?.configured, true)
+        XCTAssertEqual(hpdb?.folderPath, "/tmp/MyCard/HPDB")
+        XCTAssertEqual(hpdb?.statusText, "MyCard · HPDB")   // parent · leaf
+        XCTAssertEqual(store.activeCount, 1)
+    }
+
+    func testDisableKeepsFolderButDropsFromActive() {
+        let store = DataSourceStore()
+        store.addHpdb(folderPath: "/tmp/MyCard/HPDB")
+        store.setHpdb(enabled: false)
+        XCTAssertEqual(store.activeCount, 0)                // no longer merges into the map
+        XCTAssertEqual(store.source(.hpdb)?.folderPath, "/tmp/MyCard/HPDB")  // path retained
+        store.setHpdb(enabled: true)
+        XCTAssertEqual(store.activeCount, 1)
+    }
+}
+
+/// The SD-card pane subtitle builder — card/volume + list count + live-vs-backup origin.
+final class SdCardSubtitleTests: XCTestCase {
+    func testNoCard() {
+        XCTAssertEqual(
+            CatalogView.sdCardSubtitle(hasCard: false, volume: "", lists: 0, isLive: false),
+            "card · no card open")
+    }
+
+    func testLiveCardPluralizes() {
+        XCTAssertEqual(
+            CatalogView.sdCardSubtitle(hasCard: true, volume: "MyCard", lists: 3, isLive: true),
+            "MyCard · 3 lists · live card")
+        XCTAssertEqual(
+            CatalogView.sdCardSubtitle(hasCard: true, volume: "MyCard", lists: 1, isLive: true),
+            "MyCard · 1 list · live card")
+    }
+
+    func testBackupFolderAndBlankVolume() {
+        XCTAssertEqual(
+            CatalogView.sdCardSubtitle(hasCard: true, volume: "", lists: 0, isLive: false),
+            "card · 0 lists · backup folder")
+    }
+}

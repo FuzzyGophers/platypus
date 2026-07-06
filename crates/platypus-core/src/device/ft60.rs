@@ -85,14 +85,15 @@ impl CloneImageProfile for Ft60 {
                 .collect()
         };
         // Tone modes: label from TMODES ("" shown as "Off"); code = TMODES index; the value
-        // field each needs (CTCSS 1–3, DCS 4–7, none otherwise).
+        // field each needs (CTCSS 1–3, DCS 4–5, both for the cross modes 6–7, none otherwise).
         let tone_modes = TMODES
             .iter()
             .enumerate()
             .map(|(i, l)| {
                 let value_kind = match i {
                     1..=3 => ToneValueKind::Ctcss,
-                    4..=7 => ToneValueKind::Dcs,
+                    4..=5 => ToneValueKind::Dcs,
+                    6..=7 => ToneValueKind::Cross,
                     _ => ToneValueKind::None,
                 };
                 let label = if l.is_empty() { "Off" } else { l };
@@ -246,6 +247,13 @@ pub enum Tone {
     Ctcss(u16),
     /// DCS/DTCS octal code.
     Dcs(u16),
+    /// A cross tone mode (`Tone->DTCS` / `DTCS->Tone`) that carries **both** a CTCSS tone
+    /// (Hz ×10) and a DCS code — the record stores each in its own field (byte 8 / byte 9), so
+    /// the model must too or editing such a channel would drop one half.
+    Cross {
+        ctcss: u16,
+        dcs: u16,
+    },
 }
 
 /// One decoded FT-60 standard memory channel (a used slot). Frequencies in Hz.
@@ -397,9 +405,16 @@ impl Ft60Image {
         let tmode = (self.raw[rec + 4] & 0x07) as usize;
         let tone_idx = (self.raw[rec + 8] & 0x3F) as usize;
         let dtcs_idx = (self.raw[rec + 9] & 0x7F) as usize;
+        let ctcss = || CTCSS.get(tone_idx).copied().unwrap_or(0);
+        let dcs = || DCS.get(dtcs_idx).copied().unwrap_or(0);
         match tmode {
-            1..=3 => Tone::Ctcss(CTCSS.get(tone_idx).copied().unwrap_or(0)),
-            4..=7 => Tone::Dcs(DCS.get(dtcs_idx).copied().unwrap_or(0)),
+            1..=3 => Tone::Ctcss(ctcss()),
+            4..=5 => Tone::Dcs(dcs()),
+            // Cross modes (6 = Tone->DTCS, 7 = DTCS->Tone) carry both values.
+            6..=7 => Tone::Cross {
+                ctcss: ctcss(),
+                dcs: dcs(),
+            },
             _ => Tone::None,
         }
     }
@@ -569,15 +584,22 @@ impl Ft60Image {
             self.raw[rec + 4] = (self.raw[rec + 4] & 0xF8) | (idx & 0x07);
         }
         if &cur_tone != tone {
+            let set_ctcss = |raw: &mut [u8], hz: u16| {
+                let idx = CTCSS.iter().position(|&v| v == hz).unwrap_or(0) as u8;
+                raw[rec + 8] = (raw[rec + 8] & 0xC0) | (idx & 0x3F);
+            };
+            let set_dcs = |raw: &mut [u8], code: u16| {
+                let idx = DCS.iter().position(|&v| v == code).unwrap_or(0) as u8;
+                raw[rec + 9] = (raw[rec + 9] & 0x80) | (idx & 0x7F);
+            };
             match tone {
                 Tone::None => {} // value bytes are irrelevant when the mode carries no tone
-                Tone::Ctcss(hz) => {
-                    let idx = CTCSS.iter().position(|&v| v == *hz).unwrap_or(0) as u8;
-                    self.raw[rec + 8] = (self.raw[rec + 8] & 0xC0) | (idx & 0x3F);
-                }
-                Tone::Dcs(code) => {
-                    let idx = DCS.iter().position(|&v| v == *code).unwrap_or(0) as u8;
-                    self.raw[rec + 9] = (self.raw[rec + 9] & 0x80) | (idx & 0x7F);
+                Tone::Ctcss(hz) => set_ctcss(&mut self.raw, *hz),
+                Tone::Dcs(code) => set_dcs(&mut self.raw, *code),
+                // Cross modes store both a CTCSS (byte 8) and a DCS (byte 9) value.
+                Tone::Cross { ctcss, dcs } => {
+                    set_ctcss(&mut self.raw, *ctcss);
+                    set_dcs(&mut self.raw, *dcs);
                 }
             }
         }
@@ -672,6 +694,29 @@ impl Ft60Image {
         let n = self.raw.len();
         self.raw[n - 1] = checksum(&self.raw);
     }
+
+    /// The set-mode settings as current values, indexed by [`settings_specs`] order (each is the
+    /// value in the low bits of its byte).
+    pub fn settings(&self) -> Vec<u8> {
+        settings_specs()
+            .iter()
+            .map(|s| self.raw[s.offset] & s.mask)
+            .collect()
+    }
+
+    /// Apply set-mode settings by [`settings_specs`] order. Change-gated per field: only a byte
+    /// whose value actually changed is rewritten, and only its own bits (the reserved high bits of
+    /// each byte are preserved), so re-applying decoded settings is a byte-for-byte no-op.
+    pub fn apply_settings(&mut self, values: &[u8]) {
+        for (s, &val) in settings_specs().iter().zip(values) {
+            let val = val & s.mask;
+            if self.raw[s.offset] & s.mask != val {
+                self.raw[s.offset] = (self.raw[s.offset] & !s.mask) | val;
+            }
+        }
+        let n = self.raw.len();
+        self.raw[n - 1] = checksum(&self.raw);
+    }
 }
 
 /// One PMS band-edge record (a scan limit). `index` is 0..100; pair *p* = indices `2p`/`2p+1`
@@ -719,6 +764,105 @@ pub const STEPS_HZ: [u32; 8] = [
     5_000, 10_000, 12_500, 15_000, 20_000, 25_000, 50_000, 100_000,
 ];
 
+/// One editable set-mode setting: the value lives in `mask`'s (low) bits of byte `offset`; the
+/// reserved high bits are preserved on write. `options[value]` is the human label. Facts
+/// (offsets/bit widths/orderings) — spec-derived, see [`docs/radios/ft60.md`](../../../../docs/radios/ft60.md).
+pub struct SettingSpec {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub offset: usize,
+    pub mask: u8,
+    pub options: Vec<String>,
+}
+
+/// The modeled set-mode settings block (`0x24`+). Each value is the low bits of a dedicated byte
+/// (reserved high bits preserved), so decode/apply is a clean masked read/write.
+pub fn settings_specs() -> Vec<SettingSpec> {
+    let opt = |labels: &[&str]| labels.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let apo = std::iter::once("Off".to_string())
+        .chain((1..=24).map(|x| format!("{:.1} h", x as f64 * 0.5)))
+        .collect();
+    let tot = std::iter::once("Off".to_string())
+        .chain((1..=30).map(|x| format!("{x} min")))
+        .collect();
+    vec![
+        SettingSpec {
+            key: "apo",
+            label: "Auto power-off",
+            offset: 0x24,
+            mask: 0xFF,
+            options: apo,
+        },
+        SettingSpec {
+            key: "tot",
+            label: "Time-out timer",
+            offset: 0x25,
+            mask: 0x1F,
+            options: tot,
+        },
+        SettingSpec {
+            key: "rf_sql",
+            label: "RF squelch",
+            offset: 0x28,
+            mask: 0x0F,
+            options: opt(&[
+                "Off", "S-1", "S-2", "S-3", "S-4", "S-5", "S-6", "S-7", "S-8", "S-Full",
+            ]),
+        },
+        SettingSpec {
+            key: "lock",
+            label: "Control lock",
+            offset: 0x2B,
+            mask: 0x07,
+            options: opt(&[
+                "Key", "Dial", "Key+Dial", "PTT", "PTT+Key", "PTT+Dial", "All",
+            ]),
+        },
+        SettingSpec {
+            key: "dt_dly",
+            label: "DTMF delay",
+            offset: 0x2C,
+            mask: 0x07,
+            options: opt(&["50 ms", "100 ms", "250 ms", "450 ms", "750 ms", "1000 ms"]),
+        },
+        SettingSpec {
+            key: "dt_spd",
+            label: "DTMF speed",
+            offset: 0x2D,
+            mask: 0x01,
+            options: opt(&["50 ms", "100 ms"]),
+        },
+        SettingSpec {
+            key: "ar_bep",
+            label: "ARTS beep",
+            offset: 0x2E,
+            mask: 0x03,
+            options: opt(&["Off", "In range", "Always"]),
+        },
+        SettingSpec {
+            key: "lamp",
+            label: "Lamp",
+            offset: 0x2F,
+            mask: 0x03,
+            options: opt(&["Key", "5 sec", "Toggle"]),
+        },
+        SettingSpec {
+            key: "bell",
+            label: "Bell",
+            offset: 0x30,
+            mask: 0x07,
+            options: opt(&["Off", "1", "3", "5", "8", "Continuous"]),
+        },
+        SettingSpec {
+            key: "rxsave",
+            label: "Battery saver",
+            offset: 0x31,
+            mask: 0x07,
+            options: opt(&["Off", "200 ms", "300 ms", "500 ms", "1 s", "2 s"]),
+        },
+    ]
+}
+
 /// Decode a frequency field → Hz. The first byte's **high nibble is a flag**, not a BCD
 /// digit: the low nibble is the leading digit, and bit `0x80` is the +5 kHz step correction
 /// (12.5/25 kHz channels). So the value is 5 BCD digits × 10 kHz, plus 5 kHz when flagged.
@@ -742,24 +886,45 @@ fn write_bcd_freq(dst: &mut [u8], hz: u64) {
     dst[2] = ((d10 / 10) << 4) | (d10 % 10);
 }
 
-/// FT-60 name charset (derived from hardware): `0x00–09` = "0"–"9", `0x0A–0x23` = "A"–"Z",
-/// `0x24` = space (pad). Symbols above `0x24` are TBD (rendered as space for now).
+/// The FT-60 name symbol block: the glyphs for codes `0x25..=0x3F`, indexed by `byte - 0x25`.
+/// **Established from real hardware** — names entered symbol-by-symbol in dial order captured
+/// back as this consecutive code run. `o` (`0x27`) and `u` (`0x3C`) are the radio's own
+/// small-glyph characters; `/` appears twice (`0x33` and `0x36`) in the radio font.
+#[rustfmt::skip]
+const NAME_SYMBOLS: [char; 27] = [
+    '!', '`', 'o', '$', '%', '&', '\'', '(', ')', '*', // 0x25..=0x2E
+    '+', ',', '-', '.', '/', '|', ';', '/', '=', '>',  // 0x2F..=0x38
+    '?', '@', '[', 'u', ']', '^', '_',                 // 0x39..=0x3F
+];
+
+/// FT-60 name charset (a hardware fact): `0x00–09` = "0"–"9", `0x0A–0x23` = "A"–"Z",
+/// `0x24` = space (pad), `0x25–0x3F` = the [`NAME_SYMBOLS`] punctuation block. Codes above the
+/// charset render as space (the radio's editor never emits them).
 fn charset_byte(b: u8) -> char {
     match b {
         0x00..=0x09 => (b'0' + b) as char,
         0x0A..=0x23 => (b'A' + (b - 0x0A)) as char,
+        0x24 => ' ',
+        0x25..=0x3F => NAME_SYMBOLS[(b - 0x25) as usize],
         _ => ' ',
     }
 }
 
-/// Inverse of [`charset_byte`]: map a name char to its FT-60 code. Digits and A–Z map back
-/// exactly; anything else (incl. space and unsupported symbols) becomes `0x24` (space/pad).
+/// Inverse of [`charset_byte`]: map a name char to its FT-60 code. Digits, A–Z, space and the
+/// punctuation block map back exactly; lowercase letters fold to uppercase (the radio has no
+/// lowercase letters — its `o`/`u` glyphs are symbols, so a typed "o"/"u" means the letter);
+/// anything unsupported becomes `0x24` (space/pad).
 fn encode_charset(ch: char) -> u8 {
     match ch {
         '0'..='9' => ch as u8 - b'0',
         'A'..='Z' => 0x0A + (ch as u8 - b'A'),
         'a'..='z' => 0x0A + (ch.to_ascii_uppercase() as u8 - b'A'),
-        _ => 0x24,
+        ' ' => 0x24,
+        _ => NAME_SYMBOLS
+            .iter()
+            .position(|&c| c == ch)
+            .map(|i| 0x25 + i as u8)
+            .unwrap_or(0x24),
     }
 }
 
@@ -808,13 +973,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             POWER_LEVELS
         );
-        // Tone modes: "" surfaces as "Off"; the CTCSS/DCS value-kind split is 1–3 / 4–7.
+        // Tone modes: "" surfaces as "Off"; the value-kind split is 1–3 CTCSS / 4–5 DCS /
+        // 6–7 Cross (both).
         assert_eq!(opts.tone_modes.len(), TMODES.len());
         assert_eq!(opts.tone_modes[0].label, "Off");
         assert_eq!(opts.tone_modes[0].value_kind, ToneValueKind::None);
         assert_eq!(opts.tone_modes[1].value_kind, ToneValueKind::Ctcss); // Tone
         assert_eq!(opts.tone_modes[4].value_kind, ToneValueKind::Dcs); // DTCS
-                                                                       // Steps: formatted from STEPS_HZ; code = index.
+        assert_eq!(opts.tone_modes[6].value_kind, ToneValueKind::Cross); // Tone->DTCS
+        assert_eq!(opts.tone_modes[7].value_kind, ToneValueKind::Cross); // DTCS->Tone
+                                                                         // Steps: formatted from STEPS_HZ; code = index.
         assert_eq!(opts.steps[0].label, "5 kHz");
         assert_eq!(opts.steps[2].label, "12.5 kHz");
         assert_eq!(opts.steps.last().unwrap().label, "100 kHz");
@@ -940,6 +1108,39 @@ mod tests {
     }
 
     #[test]
+    fn name_charset_covers_symbols() {
+        // Every charset code decodes to a glyph; the common punctuation re-encodes to the same
+        // byte (clean bijection), so an edited name with symbols round-trips. The three
+        // radio-specific/duplicate glyphs (`0x27` 'o', `0x3C` 'u' fold to letters; `0x36` is the
+        // second '/') are decode-only and skipped here.
+        for b in 0x00u8..=0x3F {
+            if b == 0x27 || b == 0x36 || b == 0x3C {
+                continue;
+            }
+            assert_eq!(
+                encode_charset(charset_byte(b)),
+                b,
+                "byte {b:#04x} must round-trip"
+            );
+        }
+        // Spot-check the symbol codes confirmed against hardware (dial-order capture).
+        assert_eq!(charset_byte(0x31), '-');
+        assert_eq!(charset_byte(0x33), '/');
+        assert_eq!(charset_byte(0x3F), '_');
+
+        // A channel name with punctuation survives decode → edit → encode → decode…
+        let mut img = Ft60Image::decode(&synthetic()).unwrap();
+        let mut chans = img.channels();
+        chans[0].name = "A-B/C.".to_string();
+        img.apply_channels(&chans);
+        assert_eq!(img.channels()[0].name, "A-B/C.");
+        // …and re-applying the decoded channels is a byte-for-byte no-op (the round-trip gate).
+        let before = img.encode();
+        img.apply_channels(&img.channels());
+        assert_eq!(img.encode(), before);
+    }
+
+    #[test]
     fn duplex_and_offset_round_trip() {
         let mut img = Ft60Image::decode(&synthetic()).unwrap();
         let mut chans = img.channels();
@@ -990,6 +1191,97 @@ mod tests {
         let before = img.encode();
         img.apply_channels(&img.channels());
         assert_eq!(img.encode(), before);
+    }
+
+    /// The exact byte patterns confirmed by writing an edited image to a real FT-60 and reading
+    /// it back byte-identical: power `0/1/2` = High/Mid/Low (byte 8 bits 6–7), and a 70 cm `+`
+    /// repeater's 5 MHz offset = 100 × 50 kHz at bytes 11–12.
+    #[test]
+    fn power_and_offset_encode_to_hardware_bytes() {
+        let mut img = Ft60Image::decode(&synthetic()).unwrap();
+        let mut chans = img.channels();
+
+        chans[0].power = 1; // Mid
+        img.apply_channels(&chans);
+        assert_eq!(img.raw()[MEM_BASE + 8] & 0xC0, 0x40, "Mid = bits 01");
+        chans[0].power = 2; // Low
+        img.apply_channels(&chans);
+        assert_eq!(img.raw()[MEM_BASE + 8] & 0xC0, 0x80, "Low = bits 10");
+
+        // 70 cm repeater: +5 MHz offset encodes to 100 units at bytes 11–12, duplex nibble '+'=3.
+        chans[0].rx_hz = 442_000_000;
+        chans[0].duplex = "+";
+        chans[0].offset_hz = 5_000_000;
+        img.apply_channels(&chans);
+        assert_eq!(img.raw()[MEM_BASE] & 0x0F, 3, "duplex '+' = nibble 3");
+        let units =
+            (((img.raw()[MEM_BASE + 11] as u16) << 8) | img.raw()[MEM_BASE + 12] as u16) & 0x7FFF;
+        assert_eq!(units, 100, "5 MHz = 100 × 50 kHz");
+
+        // Still a byte-exact no-op on re-apply (the round-trip gate).
+        let before = img.encode();
+        img.apply_channels(&img.channels());
+        assert_eq!(img.encode(), before);
+    }
+
+    /// A cross tone mode (`Tone->DTCS`) must carry BOTH the CTCSS and DCS value through a
+    /// decode → edit → encode → decode cycle — the regression this fixes was the DCS half
+    /// clobbering the CTCSS half.
+    #[test]
+    fn tone_cross_mode_carries_both_values() {
+        let mut img = Ft60Image::decode(&synthetic()).unwrap();
+        let mut chans = img.channels();
+        // slot 0 starts TSQL / CTCSS 100.0. Switch to a cross mode carrying both values.
+        chans[0].tone_mode = "Tone->DTCS";
+        chans[0].tone = Tone::Cross {
+            ctcss: 1000,
+            dcs: 23,
+        };
+        img.apply_channels(&chans);
+
+        // Byte 8 low 6 bits = CTCSS index 12 (100.0 Hz); byte 9 low 7 bits = DCS index 0 (023).
+        let rec = MEM_BASE;
+        assert_eq!(img.raw()[rec + 8] & 0x3F, 12, "CTCSS index kept");
+        assert_eq!(img.raw()[rec + 9] & 0x7F, 0, "DCS index written");
+
+        let back = &img.channels()[0];
+        assert_eq!(back.tone_mode, "Tone->DTCS");
+        assert_eq!(
+            back.tone,
+            Tone::Cross {
+                ctcss: 1000,
+                dcs: 23
+            },
+            "both halves survive"
+        );
+        // Re-applying the decoded channels is a byte-for-byte no-op (round-trip gate).
+        let before = img.encode();
+        img.apply_channels(&img.channels());
+        assert_eq!(img.encode(), before);
+    }
+
+    #[test]
+    fn settings_round_trip_and_edit() {
+        let mut img = Ft60Image::decode(&synthetic()).unwrap();
+        let specs = settings_specs();
+        // Re-applying the decoded settings is a byte-for-byte no-op (round-trip gate).
+        let before = img.encode();
+        let vals = img.settings();
+        assert_eq!(vals.len(), specs.len());
+        img.apply_settings(&vals);
+        assert_eq!(img.encode(), before, "apply(settings()) must be identity");
+
+        // Edit lamp (byte 0x2F, low 2 bits) → "Toggle" (2). Only that byte's low bits move.
+        let lamp = specs.iter().position(|s| s.key == "lamp").unwrap();
+        let mut edited = img.settings();
+        edited[lamp] = 2;
+        img.apply_settings(&edited);
+        assert_eq!(img.raw()[0x2F] & 0x03, 2);
+        assert_eq!(img.settings()[lamp], 2);
+        // Reserved high bits of 0x2F untouched; re-apply is a no-op.
+        let after = img.encode();
+        img.apply_settings(&img.settings());
+        assert_eq!(img.encode(), after);
     }
 
     #[test]

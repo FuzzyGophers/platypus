@@ -15,9 +15,12 @@ repository = "https://github.com/FuzzyGophers/platypus"
 # Not published to crates.io (yet); guards against an accidental `cargo publish`.
 publish = false
 
-# Release builds abort on panic: the FFI staticlib is linked into a non-Rust (Swift) binary,
-# and a panic must never unwind across the C ABI. `extern "C"` already aborts on unwind
-# (Rust ≥ 1.81); this makes the guarantee explicit + toolchain-independent and drops the
-# unwind tables (smaller lib). Tests run in the dev profile, so they still unwind normally.
+# Release builds UNWIND on panic so the FFI boundary can recover gracefully. Every
+# `extern "C"` entry point wraps its body in `catch_unwind` (see `ffi_guard` in
+# crates/platypus-ffi/src/lib.rs) and, on a panic, returns its error/empty fallback instead of
+# crossing the C ABI. Under `panic = "abort"` that catch is a no-op (the process aborts before
+# unwinding), so a panic would take down the whole Swift app; `unwind` lets the guard turn an
+# unexpected panic into a surfaced UI error. A panic must still never *escape* an entry point —
+# that's the guard's job, enforced by the panic-recovery test.
 [profile.release]
-panic = "abort"
+panic = "unwind"

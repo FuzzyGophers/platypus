@@ -69,6 +69,11 @@ typedef struct {
     uint8_t mode;
     uint8_t tone_mode;
     uint16_t tone_value;
+    /*
+     Second squelch value for the cross tone modes (`Tone->DTCS`/`DTCS->Tone`): the DCS code,
+     while `tone_value` holds the CTCSS Hz×10. Ignored for single-value tone modes.
+     */
+    uint16_t tone_value2;
     uint8_t duplex;
     uint8_t power;
     uint8_t step;
@@ -76,6 +81,18 @@ typedef struct {
     uint16_t banks;
     char name[8];
 } PlatypusFt60Channel;
+
+/*
+ One PMS band-edge record for [`platypus_ft60_apply_pms`]. `index` is the 0-based record
+ (interleaved: `2p` = lower / `2p+1` = upper of pair `p`); `used` 0 clears the edge (frequency
+ ignored). `freq_hz` is the edge frequency; `step` the tuning-step index.
+ */
+typedef struct {
+    uint16_t index;
+    uint8_t used;
+    uint64_t freq_hz;
+    uint8_t step;
+} PlatypusFt60PmsEdge;
 
 #ifdef __cplusplus
 extern "C" {
@@ -163,8 +180,8 @@ char *platypus_systems_in_radius_json(const PlatypusHpdb *handle,
 
  Shape: `[{ "id","name","kind","tech","counties":[u64],"siteCount":u64,
    "channels":[{ "id","name","kind":"Talkgroup"|"Frequency","tgid":str|null,
-   "freqHz":u64|null,"mode":str|null,"serviceType":u16|null,"tone":str|null,
-   "encrypted":bool }] }]`  // `tone` = raw audio option (TONE=/NAC=/ColorCode=…)
+   "freqHz":u64|null,"mode":str|null,"serviceType":u16|null,"tone":str|null }] }]`
+   // `tone` = raw audio option (TONE=/NAC=/ColorCode=…)
 
  IDs are stable within a load (`s<i>` per system, `s<i>c<j>` per channel) so the
  UI can track a channel-level selection cart.
@@ -215,7 +232,6 @@ char *platypus_library_stats_json(const PlatypusLibrary *handle);
  Filter params (all optional — empty string / false = no constraint):
  - `services_csv`: service-type codes, e.g. `"3,8"` (channel-level).
  - `techs_csv`: tech categories, e.g. `"P25,DMR,Analog"` (system-level, fuzzy).
- - `hide_encrypted`: drop encrypted channels.
  - `search`: case-insensitive match on system name or channel name.
 
  # Safety
@@ -224,7 +240,6 @@ char *platypus_library_stats_json(const PlatypusLibrary *handle);
 char *platypus_library_catalog_json(const PlatypusLibrary *handle,
                                     const char *services_csv,
                                     const char *techs_csv,
-                                    bool hide_encrypted,
                                     const char *search);
 
 /*
@@ -238,7 +253,6 @@ char *platypus_library_catalog_json(const PlatypusLibrary *handle,
 char *platypus_library_channels_json(const PlatypusLibrary *handle,
                                      const char *system_id,
                                      const char *services_csv,
-                                     bool hide_encrypted,
                                      const char *search);
 
 /*
@@ -256,7 +270,6 @@ char *platypus_library_county_channels_json(const PlatypusLibrary *handle,
                                             const char *system_id,
                                             uint64_t county,
                                             const char *services_csv,
-                                            bool hide_encrypted,
                                             const char *search);
 
 /*
@@ -277,7 +290,6 @@ char *platypus_library_radius_channels_json(const PlatypusLibrary *handle,
                                             double lon,
                                             double miles,
                                             const char *services_csv,
-                                            bool hide_encrypted,
                                             const char *search);
 
 /*
@@ -300,7 +312,6 @@ char *platypus_library_geo_json(const PlatypusLibrary *handle,
                                 double miles,
                                 const char *services_csv,
                                 const char *techs_csv,
-                                bool hide_encrypted,
                                 const char *search);
 
 /*
@@ -626,13 +637,30 @@ PlatypusFt60 *platypus_ft60_read(const char *port,
                                  char **err_out);
 
 /*
+ Save a read handle's raw clone image as a `.img` **backup** — the restore point captured on
+ every radio Read. Writes `<dir>/<stem>.img`, creating `dir` and `fsync`ing the file so the
+ bytes are durably on disk (the same "an `Ok` isn't enough until it's flushed" discipline as the
+ card path). The persistence lives here in the core FFI, not the app, so every front-end backs
+ up identically. Returns the backup file path (caller frees with [`platypus_string_free`]), or
+ null + `*err_out` on failure.
+
+ # Safety
+ `handle` valid or null; `dir`/`stem` valid C strings; `err_out` valid or null.
+ */
+char *platypus_ft60_backup(const PlatypusFt60 *handle,
+                           const char *dir,
+                           const char *stem,
+                           char **err_out);
+
+/*
  The decoded standard memories as a JSON array — the shape the FT-60 editor consumes.
  Every enumerated field crosses as its on-radio **code** (symmetric with the write struct
  `PlatypusFt60Channel`), so the app never string-matches an attribute: `[{ slot, name,
- freqHz, modeCode, toneModeCode, toneMode:"off"|"ctcss"|"dcs", toneValue, duplexCode,
- offsetHz, txHz, power, step, skip:0|1|2, banks:[u8] }]`. The codes index the option lists
- from [`platypus_ft60_options_json`]. `toneMode` is the value-kind for reconstructing the
- squelch value; `skip` 0=none/1=S/2=P.
+ freqHz, modeCode, toneModeCode, toneMode:"off"|"ctcss"|"dcs"|"cross", toneValue, toneValue2,
+ duplexCode, offsetHz, txHz, power, step, skip:0|1|2, banks:[u8] }]`. The codes index the
+ option lists from [`platypus_ft60_options_json`]. `toneMode` is the value-kind for
+ reconstructing the squelch value; for `"cross"` (`Tone->DTCS`/`DTCS->Tone`) `toneValue` is the
+ CTCSS Hz×10 and `toneValue2` the DCS code. `skip` 0=none/1=S/2=P.
 
  # Safety
  `handle` must be valid or null.
@@ -692,6 +720,24 @@ PlatypusFt60 *platypus_ft60_apply(const uint8_t *base,
                                   char **err_out);
 
 /*
+ Apply edited PMS band-edge records onto `base` and return a new handle carrying the edits + a
+ valid checksum (a pure transform — no I/O), parallel to [`platypus_ft60_apply`]. Only the
+ records you pass are touched (partial-apply); read the result with
+ [`platypus_ft60_image_bytes`] and clone it out with [`platypus_ft60_write`]. Re-applying the
+ edges a read produced is a byte-for-byte no-op (the round-trip gate). Null on a bad base image
+ (`*err_out` set).
+
+ # Safety
+ `base` must be valid for `base_len`; `edges` valid for `edges_len` (or null when 0);
+ `err_out` a valid pointer or null.
+ */
+PlatypusFt60 *platypus_ft60_apply_pms(const uint8_t *base,
+                                      size_t base_len,
+                                      const PlatypusFt60PmsEdge *edges,
+                                      size_t edges_len,
+                                      char **err_out);
+
+/*
  The programmed PMS band-edge memories as a JSON array — the shape the FT-60 editor's scan-edge
  section consumes: `[{ index, freqHz, step }]` (only `used` edges; index 0..100, interleaved
  lower/upper pairs). Empty `[]` when none are set.
@@ -700,6 +746,33 @@ PlatypusFt60 *platypus_ft60_apply(const uint8_t *base,
  `handle` must be valid or null.
  */
 char *platypus_ft60_pms_json(const PlatypusFt60 *handle);
+
+/*
+ The FT-60 set-mode settings as a JSON array (spec order) — the shape the settings editor
+ consumes: `[{ key, label, value, options:[str] }]`. `value` indexes `options`. Null on a null
+ handle.
+
+ # Safety
+ `handle` must be valid or null.
+ */
+char *platypus_ft60_settings_json(const PlatypusFt60 *handle);
+
+/*
+ Apply edited set-mode settings onto `base` (values in `settings_specs` order) and return a new
+ handle carrying the edits + a valid checksum — parallel to [`platypus_ft60_apply`]. Read the
+ result with [`platypus_ft60_image_bytes`] and clone it out with [`platypus_ft60_write`].
+ Change-gated, so re-applying a read's settings is a byte-for-byte no-op. Null on a bad base
+ image (`*err_out` set).
+
+ # Safety
+ `base` valid for `base_len`; `values` valid for `values_len` (or null when 0); `err_out` valid
+ or null.
+ */
+PlatypusFt60 *platypus_ft60_apply_settings(const uint8_t *base,
+                                           size_t base_len,
+                                           const uint8_t *values,
+                                           size_t values_len,
+                                           char **err_out);
 
 #ifdef __cplusplus
 }  // extern "C"

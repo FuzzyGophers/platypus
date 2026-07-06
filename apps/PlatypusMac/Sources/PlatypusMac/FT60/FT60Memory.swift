@@ -18,6 +18,7 @@ enum FTTone: Equatable, Codable {
     case off
     case ctcss(Double)  // CTCSS tone frequency in Hz, e.g. 100.0
     case dcs(Int)  // DCS code, e.g. 23
+    case cross(ctcss: Double, dcs: Int)  // Tone->DTCS / DTCS->Tone: carries both values
 
     /// Parse the raw audio-option field our model carries (`TONE=C156.7` / `TONE=D023`).
     /// Conventional channels only ever carry CTCSS/DCS here (NAC/ColorCode are trunked).
@@ -29,21 +30,23 @@ enum FTTone: Equatable, Codable {
         return .off
     }
 
-    /// Short display, e.g. "CTCSS 100.0 Hz" / "DCS 023" / "—".
+    /// Short display, e.g. "CTCSS 100.0 Hz" / "DCS 023" / "CTCSS 100.0 Hz · DCS 023" / "—".
     var display: String {
         switch self {
         case .off: return "—"
         case .ctcss(let f): return String(format: "CTCSS %.1f Hz", f)
         case .dcs(let c): return String(format: "DCS %03d", c)
+        case .cross(let f, let c): return String(format: "CTCSS %.1f Hz · DCS %03d", f, c)
         }
     }
 
-    /// Selector state ("Off" / "CTCSS" / "DCS") for the tone-mode menu.
+    /// Selector state ("Off" / "CTCSS" / "DCS" / "Cross") for the tone-mode menu.
     var modeLabel: String {
         switch self {
         case .off: return "Off"
         case .ctcss: return "CTCSS"
         case .dcs: return "DCS"
+        case .cross: return "Cross"
         }
     }
 }
@@ -114,14 +117,27 @@ final class FT60Memory: ObservableObject {
     /// non-empty `image` is what gates the Write action.
     var image: [UInt8]
 
-    /// Programmed PMS band-edge (scan-limit) pairs, from a Read. Read-only display for now.
+    /// Programmed PMS band-edge (scan-limit) pairs, from a Read. Editable — written back via the
+    /// same clone-out path as channels.
     @Published var pms: [FT60PmsPair]
 
-    init(capacity: FTCapacity, channels: [FT60Channel] = [], image: [UInt8] = [], pms: [FT60PmsPair] = []) {
+    /// Set-mode radio settings (APO, squelch, lamp…), from a Read. Editable; written back with the
+    /// channel/PMS edits.
+    @Published var settings: [FT60Setting]
+
+    init(capacity: FTCapacity, channels: [FT60Channel] = [], image: [UInt8] = [],
+         pms: [FT60PmsPair] = [], settings: [FT60Setting] = []) {
         self.capacity = capacity
         self.channels = channels
         self.image = image
         self.pms = pms
+        self.settings = settings
+    }
+
+    /// Set a setting's value by key (from the editor picker).
+    func updateSetting(key: String, value: Int) {
+        guard let i = settings.firstIndex(where: { $0.key == key }) else { return }
+        settings[i].value = value
     }
 
     /// True when this memory carries a real captured image that can be written back.
@@ -176,6 +192,7 @@ final class FT60Memory: ObservableObject {
             case .off: toneLabel = "Off"
             case .ctcss: toneLabel = "TSQL"
             case .dcs: toneLabel = "DTCS"
+            case .cross: toneLabel = "Tone->DTCS"  // catalog tones are never cross; kept exhaustive
             }
             // Mode by label (defaults to the first option, FM, if the catalog string is unknown).
             let modeCode = mode.flatMap { opts.code(opts.modes, label: $0.uppercased()) }
@@ -213,5 +230,28 @@ final class FT60Memory: ObservableObject {
     func update(_ ch: FT60Channel) {
         guard let i = channels.firstIndex(where: { $0.slot == ch.slot }) else { return }
         channels[i] = ch
+    }
+
+    // -- PMS band-edge pairs -------------------------------------------------
+
+    /// The FT-60 has 50 PMS pairs (L01/U01 … L50/U50).
+    static let pmsCapacity = 50
+
+    /// Replace a PMS pair in place, or insert it (kept sorted by pair index) if new. Emitting the
+    /// whole `pms` list on write is safe: unchanged pairs are a change-gated no-op in the core, and
+    /// a pair with both edges cleared writes `used=0` (removing it from the radio).
+    func updatePms(_ p: FT60PmsPair) {
+        if let i = pms.firstIndex(where: { $0.pair == p.pair }) {
+            pms[i] = p
+        } else {
+            pms.append(p)
+            pms.sort { $0.pair < $1.pair }
+        }
+    }
+
+    /// The lowest pair index (0-based) not yet in the list, or nil if all 50 are used.
+    var nextFreePmsPair: Int? {
+        let taken = Set(pms.map { $0.pair })
+        return (0..<Self.pmsCapacity).first { !taken.contains($0) }
     }
 }

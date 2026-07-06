@@ -123,20 +123,22 @@ enum DataSourceKind: String, CaseIterable, Identifiable {
 /// not yet stored in Keychain or validated against the network).
 struct DataSource: Identifiable {
     let kind: DataSourceKind
-    /// Whether the user has added this source (built-ins are always added; external
-    /// sources appear only after being added via the Add sheet).
+    /// Whether the user has added this source. Nothing is added by default: HPDB is added by
+    /// picking a folder of `s_*.hpd` files; external sources by capturing credentials.
     var added: Bool
     var enabled: Bool
     var token: String?
     var email: String?
     var appKey: String?
+    /// For HPDB: the picked folder of `s_*.hpd` files that feeds the map (its "credential").
+    var folderPath: String?
 
     var id: String { kind.id }
 
-    /// True once the source has whatever credential it needs (or needs none).
+    /// True once the source has whatever it needs — a folder (HPDB) or a credential (external).
     var configured: Bool {
         switch kind {
-        case .hpdb: return true
+        case .hpdb: return folderPath != nil
         case .repeaterBook: return !(token ?? "").isEmpty
         case .radioReference: return !(appKey ?? "").isEmpty
         }
@@ -144,7 +146,13 @@ struct DataSource: Identifiable {
 
     /// The status line shown in the dropdown.
     var statusText: String {
-        if kind == .hpdb { return kind.detail }
+        if kind == .hpdb {
+            guard let folderPath else { return "no folder" }
+            // Show the folder plus its parent (e.g. "MyCard · HPDB") — the leaf is usually "HPDB".
+            let leaf = (folderPath as NSString).lastPathComponent
+            let parent = ((folderPath as NSString).deletingLastPathComponent as NSString).lastPathComponent
+            return parent.isEmpty ? leaf : "\(parent) · \(leaf)"
+        }
         if !configured { return "needs \(kind.credentialNoun)" }
         return "ready · stub"  // configured but no live fetch yet
     }
@@ -155,10 +163,10 @@ final class DataSourceStore: ObservableObject {
     @Published var sources: [DataSource]
 
     init() {
-        // HPDB is the built-in, added + on by default; the external sources aren't added
-        // until the user adds them via the Add sheet.
+        // Nothing is added by default. HPDB is added by picking a folder (map data, separate
+        // from the target radio); the external sources by capturing credentials via the Add sheet.
         sources = [
-            DataSource(kind: .hpdb, added: true, enabled: true),
+            DataSource(kind: .hpdb, added: false, enabled: false),
             DataSource(kind: .repeaterBook, added: false, enabled: false),
             DataSource(kind: .radioReference, added: false, enabled: false),
         ]
@@ -176,6 +184,20 @@ final class DataSourceStore: ObservableObject {
     func toggle(_ kind: DataSourceKind) {
         guard let i = index(kind) else { return }
         sources[i].enabled.toggle()
+    }
+
+    /// Add (or re-point) the HPDB source to a picked folder of `s_*.hpd` files — added + on.
+    func addHpdb(folderPath: String) {
+        guard let i = index(.hpdb) else { return }
+        sources[i].folderPath = folderPath
+        sources[i].added = true
+        sources[i].enabled = true
+    }
+
+    /// Enable/disable the HPDB map source without dropping its picked folder.
+    func setHpdb(enabled: Bool) {
+        guard let i = index(.hpdb) else { return }
+        sources[i].enabled = enabled
     }
 
     /// Store captured credentials and mark the source added + enabled (shell — no validation yet).
@@ -202,9 +224,10 @@ final class DataSourceStore: ObservableObject {
             .sorted { $0.kind.name.localizedCaseInsensitiveCompare($1.kind.name) == .orderedAscending }
     }
 
-    /// Kinds not yet added (and needing credentials) — drives the "Add a source…" submenu.
+    /// Kinds not yet added — drives the "Add a source…" submenu (HPDB adds by folder, the
+    /// external sources by credential).
     var addableKinds: [DataSourceKind] {
-        sources.filter { !$0.added && $0.kind.needsCredential }
+        sources.filter { !$0.added }
             .map(\.kind)
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }

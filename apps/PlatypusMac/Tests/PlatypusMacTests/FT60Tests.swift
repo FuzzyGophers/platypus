@@ -27,6 +27,13 @@ final class FTToneTests: XCTestCase {
         XCTAssertEqual(FTTone.off.display, "—")
         XCTAssertEqual(FTTone.off.modeLabel, "Off")
     }
+
+    func testCrossCarriesBothValues() {
+        let t = FTTone.cross(ctcss: 100.0, dcs: 23)
+        XCTAssertEqual(t.display, "CTCSS 100.0 Hz · DCS 023")
+        XCTAssertEqual(t.modeLabel, "Cross")
+        XCTAssertNotEqual(t, .cross(ctcss: 100.0, dcs: 25)) // both halves are identity-bearing
+    }
 }
 
 /// `Ft60Options` code↔label lookups + duplex semantics (pure over an injected list).
@@ -121,5 +128,61 @@ final class FT60MemoryTests: XCTestCase {
     func testFrequencyFormatting() {
         XCTAssertEqual(chan(0).freqMHz, "146.5200")
         XCTAssertTrue(chan(0).detail.contains("146.5200 MHz"))
+    }
+}
+
+/// PMS band-edge pair grouping (interleaved) + the editor's model mutations.
+final class FT60PmsTests: XCTestCase {
+    func testGroupInterleaved() {
+        // record 2p = lower, 2p+1 = upper (confirmed on hardware).
+        let edges = [
+            FT60PmsEdgeDTO(index: 0, freqHz: 144_000_000, step: 0),
+            FT60PmsEdgeDTO(index: 1, freqHz: 148_000_000, step: 0),
+            FT60PmsEdgeDTO(index: 2, freqHz: 440_000_000, step: 3),
+        ]
+        let pairs = FT60PmsPair.group(edges)
+        XCTAssertEqual(pairs.count, 2)
+        XCTAssertEqual(pairs[0].pair, 0)
+        XCTAssertEqual(pairs[0].lowerHz, 144_000_000)
+        XCTAssertEqual(pairs[0].upperHz, 148_000_000)
+        XCTAssertEqual(pairs[0].lowerIndex, 0)
+        XCTAssertEqual(pairs[0].upperIndex, 1)
+        // pair 1 has only a lower edge so far (record index 2).
+        XCTAssertEqual(pairs[1].lowerHz, 440_000_000)
+        XCTAssertNil(pairs[1].upperHz)
+    }
+
+    func testMemoryMutations() {
+        let cap = FTCapacity(channels: 1000, banks: 10, nameLen: 6)
+        let mem = FT60Memory(
+            capacity: cap,
+            pms: [FT60PmsPair(pair: 0, lowerHz: 144_000_000, upperHz: 148_000_000)])
+        XCTAssertEqual(mem.nextFreePmsPair, 1)
+        // edit in place
+        mem.updatePms(FT60PmsPair(pair: 0, lowerHz: 145_000_000, upperHz: 147_000_000))
+        XCTAssertEqual(mem.pms.count, 1)
+        XCTAssertEqual(mem.pms[0].lowerHz, 145_000_000)
+        // add a new pair → kept sorted, next free advances
+        mem.updatePms(FT60PmsPair(pair: 1, lowerHz: 440_000_000, upperHz: 445_000_000))
+        XCTAssertEqual(mem.pms.map { $0.pair }, [0, 1])
+        XCTAssertEqual(mem.nextFreePmsPair, 2)
+    }
+}
+
+/// FT-60 set-mode settings model (pick-list value/label) + editor mutation.
+final class FT60SettingsTests: XCTestCase {
+    func testValueLabelAndMutation() {
+        let lamp = FT60Setting(key: "lamp", label: "Lamp", value: 0, options: ["Key", "5 sec", "Toggle"])
+        XCTAssertEqual(lamp.valueLabel, "Key")
+        // out-of-range value falls back to the raw number (never crashes).
+        XCTAssertEqual(FT60Setting(key: "x", label: "X", value: 9, options: ["a"]).valueLabel, "9")
+
+        let mem = FT60Memory(
+            capacity: FTCapacity(channels: 1000, banks: 10, nameLen: 6), settings: [lamp])
+        mem.updateSetting(key: "lamp", value: 2)
+        XCTAssertEqual(mem.settings[0].value, 2)
+        XCTAssertEqual(mem.settings[0].valueLabel, "Toggle")
+        mem.updateSetting(key: "missing", value: 1)  // unknown key → no-op
+        XCTAssertEqual(mem.settings.count, 1)
     }
 }

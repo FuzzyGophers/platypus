@@ -2,11 +2,18 @@
 // Copyright (C) 2026 The Platypus Authors
 import SwiftUI
 
-/// Drives the channel-form sheet: add a new channel, or edit an existing one.
+/// Drives the editor sheet: add a channel, edit a channel, or edit a PMS scan-edge pair.
 enum FT60SheetMode: Identifiable {
     case add
     case edit(FT60Channel)
-    var id: Int { if case .edit(let c) = self { return c.slot } else { return -1 } }
+    case editPms(FT60PmsPair)
+    var id: Int {
+        switch self {
+        case .add: return -1
+        case .edit(let c): return c.slot
+        case .editPms(let p): return 1_000_000 + p.pair  // distinct id space from channel slots
+        }
+    }
     var channel: FT60Channel? { if case .edit(let c) = self { return c } else { return nil } }
 }
 
@@ -21,15 +28,23 @@ struct FT60EditorView: View {
     /// The active radio's display name (from the core registry) — the editor is generic over
     /// clone-image radios, so nothing here is hardcoded to a specific model.
     let radioName: String
+    /// The active radio's glyph + accent (from the core registry), so the header matches the
+    /// catalog's radio switcher rather than hardcoding a model.
+    var symbol: String = "dot.radiowaves.left.and.right"
+    var accent: Color = Theme.accent
     /// The bank location-first adds land in (nil = Unbanked / All Memories). Also the
     /// highlighted "add target" section.
     @Binding var selectedBank: Int?
     var onRead: () -> Void
     var onWrite: () -> Void
+    /// Open a saved backup image into the editor (editable, then Write).
+    var onOpenBackup: () -> Void
 
     @State private var detailsSlot: Int?
     /// The channel-form sheet: add a new channel, or edit an existing one.
     @State private var sheet: FT60SheetMode?
+    /// The radio-settings dialog (gear button).
+    @State private var showSettings = false
     /// Collapsed section keys ("all", "b0"…"b9", "unbanked"); absent = expanded.
     @State private var collapsed: Set<String> = []
 
@@ -50,7 +65,7 @@ struct FT60EditorView: View {
                         }
                         section(key: "unbanked", title: "Unbanked", bank: nil,
                                 rows: memory.unbanked.sorted { $0.slot < $1.slot }, isUnbanked: true)
-                        if !memory.pms.isEmpty { pmsSection }
+                        if memory.canWrite || !memory.pms.isEmpty { pmsSection }
                     }
                     .padding(8)
                 }
@@ -59,11 +74,15 @@ struct FT60EditorView: View {
             footer
         }
         .sheet(item: $sheet) { mode in
-            FT60ChannelSheet(nameLimit: memory.capacity.nameLen, editing: mode.channel) { make in
-                if let ed = mode.channel {
-                    memory.update(make(ed.slot))
-                } else {
-                    memory.append(make, toBank: selectedBank)
+            if case .editPms(let pair) = mode {
+                FT60PmsSheet(pair: pair) { memory.updatePms($0) }
+            } else {
+                FT60ChannelSheet(nameLimit: memory.capacity.nameLen, editing: mode.channel) { make in
+                    if let ed = mode.channel {
+                        memory.update(make(ed.slot))
+                    } else {
+                        memory.append(make, toBank: selectedBank)
+                    }
                 }
             }
         }
@@ -97,17 +116,12 @@ struct FT60EditorView: View {
     // MARK: - Header (device + clone actions)
 
     private var headerBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(Theme.accent)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(radioName).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.fg)
-                Text(subtitle).font(.system(size: 9.5)).foregroundStyle(Theme.fg3)
-            }
-            Spacer()
-            Button("Read", action: onRead).controlSize(.small)
-            Button("Write", action: onWrite).buttonStyle(.borderedProminent).controlSize(.small)
-        }
-        .padding(.horizontal, 12).padding(.vertical, 9)
+        RadioActionBar(
+            symbol: symbol, accent: accent, name: radioName, subtitle: subtitle,
+            onSettings: { showSettings = true }, settingsDisabled: memory.settings.isEmpty,
+            onOpen: onOpenBackup, onRead: onRead, onWrite: onWrite,
+            writeHelp: "Clone the edited image to the radio")
+            .sheet(isPresented: $showSettings) { FT60SettingsSheet(memory: memory) }
     }
 
     // MARK: - A section (All Memories / a bank / Unbanked)
@@ -335,8 +349,19 @@ struct FT60EditorView: View {
                         Image(systemName: "arrow.right").font(.system(size: 8)).foregroundStyle(Theme.fg3)
                         Text(edgeLabel(pair.upperHz)).font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.fg2)
                         Spacer()
+                        Button { sheet = .editPms(pair) } label: {
+                            Image(systemName: "pencil").font(.system(size: 10)).foregroundStyle(Theme.accent)
+                        }.buttonStyle(.plain).help("Edit scan edge")
                     }
                     .padding(.horizontal, 10).padding(.vertical, 4)
+                }
+                if let next = memory.nextFreePmsPair {
+                    Button { sheet = .editPms(FT60PmsPair(pair: next)) } label: {
+                        Label("Add scan edge", systemImage: "plus.circle").font(.system(size: 10.5))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(Theme.accent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
                 }
             }
         }
@@ -378,6 +403,7 @@ private struct FT60ChannelSheet: View {
     @State private var modeCode: Int
     @State private var toneModeCode: Int
     @State private var toneText: String
+    @State private var toneText2: String  // DCS half of a cross tone mode (CTCSS in toneText)
     @State private var powerCode: Int
     @State private var duplexCode: Int
     @State private var offsetText: String
@@ -401,12 +427,15 @@ private struct FT60ChannelSheet: View {
         _offsetText = State(initialValue: editing.flatMap { $0.offsetHz > 0 ? String(format: "%.4f", Double($0.offsetHz) / 1_000_000) : nil } ?? "")
         _txText = State(initialValue: editing.flatMap { $0.txHz > 0 ? String(format: "%.4f", Double($0.txHz) / 1_000_000) : nil } ?? "")
         let toneVal: String
+        let toneVal2: String
         switch editing?.tone {
-        case .ctcss(let f): toneVal = String(format: "%.1f", f)
-        case .dcs(let c): toneVal = String(c)
-        default: toneVal = ""
+        case .ctcss(let f): (toneVal, toneVal2) = (String(format: "%.1f", f), "")
+        case .dcs(let c): (toneVal, toneVal2) = (String(c), "")
+        case .cross(let f, let c): (toneVal, toneVal2) = (String(format: "%.1f", f), String(c))
+        default: (toneVal, toneVal2) = ("", "")
         }
         _toneText = State(initialValue: toneVal)
+        _toneText2 = State(initialValue: toneVal2)
     }
 
     private var isEdit: Bool { editing != nil }
@@ -446,6 +475,8 @@ private struct FT60ChannelSheet: View {
         switch toneValueKind {
         case "ctcss": return Double(toneText).map(FTTone.ctcss) ?? .ctcss(100.0)
         case "dcs": return Int(toneText).map(FTTone.dcs) ?? .dcs(23)
+        case "cross":
+            return .cross(ctcss: Double(toneText) ?? 100.0, dcs: Int(toneText2) ?? 23)
         default: return .off
         }
     }
@@ -480,7 +511,11 @@ private struct FT60ChannelSheet: View {
                             ForEach(opts.toneModes, id: \.code) { Text($0.label).tag($0.code) }
                         }.pickerStyle(.menu).labelsHidden().fixedSize()
                     }
-                    if toneValueKind != "none" {
+                    if toneValueKind == "cross" {
+                        // Cross modes (Tone->DTCS / DTCS->Tone) carry both a CTCSS and a DCS value.
+                        field("CTCSS tone (Hz)", "100.0", $toneText)
+                        field("DCS code", "23", $toneText2)
+                    } else if toneValueKind != "none" {
                         field(toneValueKind == "ctcss" ? "CTCSS tone (Hz)" : "DCS code",
                               toneValueKind == "ctcss" ? "100.0" : "23", $toneText)
                     }
@@ -559,5 +594,131 @@ private struct FT60ChannelSheet: View {
             Text(label).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Theme.fg3)
             picker()
         }
+    }
+}
+
+/// The PMS band-edge form — edit one scan-limit pair's lower/upper frequencies and step. A blank
+/// field clears that edge (written as `used=0`).
+private struct FT60PmsSheet: View {
+    let pair: FT60PmsPair
+    let onSave: (FT60PmsPair) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var lowerText: String
+    @State private var upperText: String
+    @State private var stepCode: Int
+
+    init(pair: FT60PmsPair, onSave: @escaping (FT60PmsPair) -> Void) {
+        self.pair = pair
+        self.onSave = onSave
+        let mhz: (UInt64?) -> String = { $0.map { String(format: "%.4f", Double($0) / 1_000_000) } ?? "" }
+        _lowerText = State(initialValue: mhz(pair.lowerHz))
+        _upperText = State(initialValue: mhz(pair.upperHz))
+        _stepCode = State(initialValue: pair.step)
+    }
+
+    private var opts: Ft60Options { Ft60Options.shared }
+    private func mhz(_ t: String) -> UInt64? {
+        guard let v = Double(t.trimmingCharacters(in: .whitespaces)), v > 0 else { return nil }
+        return UInt64((v * 1_000_000).rounded())
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            VStack(spacing: 7) {
+                Image(systemName: "arrow.left.and.right")
+                    .font(.system(size: 18)).foregroundStyle(.white)
+                    .frame(width: 46, height: 46).background(Circle().fill(Theme.accent))
+                Text("Scan edge \(pair.label)").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.fg)
+                Text("Band limits for programmable memory scan")
+                    .font(.system(size: 11)).foregroundStyle(Theme.fg3)
+            }.frame(maxWidth: .infinity)
+
+            VStack(alignment: .leading, spacing: 10) {
+                field("Lower edge (MHz)", "144.0000", $lowerText)
+                field("Upper edge (MHz)", "148.0000", $upperText)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Step").font(.system(size: 10.5, weight: .medium)).foregroundStyle(Theme.fg3)
+                    Picker("", selection: $stepCode) {
+                        ForEach(opts.steps, id: \.code) { Text($0.label).tag($0.code) }
+                    }.pickerStyle(.menu).labelsHidden().fixedSize()
+                }
+                Text("Leave a field blank to clear that edge.")
+                    .font(.system(size: 10)).foregroundStyle(Theme.fg3)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("Cancel") { dismiss() }.controlSize(.large)
+                Button("Save") {
+                    var p = pair
+                    p.lowerHz = mhz(lowerText)
+                    p.upperHz = mhz(upperText)
+                    p.step = stepCode
+                    onSave(p)
+                    dismiss()
+                }.buttonStyle(.borderedProminent).controlSize(.large)
+                Spacer()
+            }
+        }
+        .padding(18).frame(width: 340).background(Theme.panel)
+    }
+
+    private func field(_ label: String, _ placeholder: String, _ text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Theme.fg3)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.fg)
+                .padding(.horizontal, 9).padding(.vertical, 7)
+                .background(Theme.bg3).clipShape(RoundedRectangle(cornerRadius: Theme.rField))
+                .overlay(RoundedRectangle(cornerRadius: Theme.rField).stroke(Theme.border))
+        }
+    }
+}
+
+/// The radio set-mode settings dialog (the header gear). One menu picker per setting; edits bind
+/// straight into the memory model and go to the radio on the next Write (chained after channels +
+/// PMS). Kept out of the channel list so it's reachable even with a full memory.
+private struct FT60SettingsSheet: View {
+    @ObservedObject var memory: FT60Memory
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 14) {
+            VStack(spacing: 7) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 18)).foregroundStyle(.white)
+                    .frame(width: 46, height: 46).background(Circle().fill(Theme.accent))
+                Text("Radio settings").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.fg)
+                Text("Set-mode menu — written on the next Write")
+                    .font(.system(size: 11)).foregroundStyle(Theme.fg3)
+            }.frame(maxWidth: .infinity)
+
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(memory.settings) { setting in
+                        HStack(spacing: 6) {
+                            Text(setting.label)
+                                .font(.system(size: 11.5)).foregroundStyle(Theme.fg2)
+                                .frame(width: 130, alignment: .leading)
+                            Spacer()
+                            Picker("", selection: binding(setting.key)) {
+                                ForEach(Array(setting.options.enumerated()), id: \.offset) { i, opt in
+                                    Text(opt).tag(i)
+                                }
+                            }.pickerStyle(.menu).labelsHidden().fixedSize()
+                        }
+                    }
+                }
+            }.frame(maxHeight: 320)
+
+            Button("Done") { dismiss() }.buttonStyle(.borderedProminent).controlSize(.large)
+        }
+        .padding(18).frame(width: 320).background(Theme.panel)
+    }
+
+    private func binding(_ key: String) -> Binding<Int> {
+        Binding(
+            get: { memory.settings.first(where: { $0.key == key })?.value ?? 0 },
+            set: { memory.updateSetting(key: key, value: $0) })
     }
 }

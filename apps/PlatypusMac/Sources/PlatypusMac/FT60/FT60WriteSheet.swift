@@ -5,8 +5,8 @@ import SwiftUI
 /// Guided "write to the radio" sheet — the clone-OUT counterpart of `FT60ReadSheet`. Picks the
 /// serial port (live re-scan, same as the read sheet), walks the FT-60 clone RECEIVE steps
 /// (`-WAIT-`), and makes the operator confirm — this writes to the radio's memory. The transfer
-/// runs behind the operation overlay (progress + cancel). Scope: writes the exact image that was
-/// read back (byte-for-byte), so even a partial transfer can't corrupt data.
+/// runs behind the operation overlay (progress + cancel). Scope: writes the edited image (channel +
+/// PMS edits applied onto the read image), preserving every byte we don't model.
 struct FT60WriteSheet: View {
     let channelCount: Int
     let onStart: (String) -> Void
@@ -85,7 +85,7 @@ struct FT60WriteSheet: View {
             .toggleStyle(.checkbox)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text("Writes the exact image just read from this radio (byte-for-byte) — safe even if interrupted.")
+            Text("Writes your edited image back to this radio; every byte you didn't change is preserved from the read.")
                 .font(.system(size: 9.5)).foregroundStyle(Theme.fg3)
                 .multilineTextAlignment(.center).frame(maxWidth: .infinity)
 

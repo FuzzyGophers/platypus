@@ -203,8 +203,8 @@ pub struct ScannerLimits {
 }
 
 /// Which value a tone-mode option needs from the user: a CTCSS frequency, a DCS code,
-/// or nothing (plain off / no squelch value). Lets a UI show the right value field
-/// without re-encoding "tone-mode 1–3 = CTCSS, 4–7 = DCS".
+/// both (the cross modes), or nothing (plain off / no squelch value). Lets a UI show the
+/// right value field(s) without re-encoding "tone-mode 1–3 = CTCSS, 4–5 = DCS, 6–7 = both".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToneValueKind {
     /// No value needed (e.g. "Off").
@@ -213,6 +213,8 @@ pub enum ToneValueKind {
     Ctcss,
     /// A DCS/DTCS code.
     Dcs,
+    /// Both a CTCSS frequency and a DCS code (`Tone->DTCS` / `DTCS->Tone`).
+    Cross,
 }
 
 /// One selectable value for an editable radio field: the human `label` a UI shows and the

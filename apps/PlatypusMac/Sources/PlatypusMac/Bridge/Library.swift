@@ -33,7 +33,6 @@ struct CatalogChannel: Codable, Identifiable {
     let serviceType: Int?
     /// Raw audio-option field (CTCSS/DCS tone, P25 NAC, DMR color code…), or nil.
     var tone: String?
-    let encrypted: Bool
 
     var isTalkgroup: Bool { kind == "Talkgroup" }
 
@@ -77,13 +76,12 @@ struct GeoSystem: Codable, Identifiable {
 struct FilterState: Equatable {
     var services: Set<Int> = []
     var techs: Set<String> = []
-    var hideEncrypted = false
     var search = ""
 
     var servicesCSV: String { services.sorted().map(String.init).joined(separator: ",") }
     var techsCSV: String { techs.sorted().joined(separator: ",") }
 
-    var isEmpty: Bool { services.isEmpty && techs.isEmpty && !hideEncrypted && search.isEmpty }
+    var isEmpty: Bool { services.isEmpty && techs.isEmpty && search.isEmpty }
 }
 
 /// Boxes a Swift progress closure so it can cross the C ABI via an opaque context.
@@ -136,7 +134,7 @@ final class ScannerLibrary {
         let ptr = f.servicesCSV.withCString { svc in
             f.techsCSV.withCString { tech in
                 f.search.withCString { search in
-                    platypus_library_catalog_json(handle, svc, tech, f.hideEncrypted, search)
+                    platypus_library_catalog_json(handle, svc, tech, search)
                 }
             }
         }
@@ -157,7 +155,7 @@ final class ScannerLibrary {
         let ptr = f.servicesCSV.withCString { svc in
             f.techsCSV.withCString { tech in
                 f.search.withCString { search in
-                    platypus_library_geo_json(handle, lat, lon, miles, svc, tech, f.hideEncrypted, search)
+                    platypus_library_geo_json(handle, lat, lon, miles, svc, tech, search)
                 }
             }
         }
@@ -179,7 +177,7 @@ final class ScannerLibrary {
         let ptr = systemID.withCString { sid in
             f.servicesCSV.withCString { svc in
                 f.search.withCString { search in
-                    platypus_library_channels_json(handle, sid, svc, f.hideEncrypted, search)
+                    platypus_library_channels_json(handle, sid, svc, search)
                 }
             }
         }
@@ -193,7 +191,7 @@ final class ScannerLibrary {
             f.servicesCSV.withCString { svc in
                 f.search.withCString { search in
                     platypus_library_county_channels_json(
-                        handle, sid, county, svc, f.hideEncrypted, search)
+                        handle, sid, county, svc, search)
                 }
             }
         }
@@ -209,7 +207,7 @@ final class ScannerLibrary {
             f.servicesCSV.withCString { svc in
                 f.search.withCString { search in
                     platypus_library_radius_channels_json(
-                        handle, sid, lat, lon, miles, svc, f.hideEncrypted, search)
+                        handle, sid, lat, lon, miles, svc, search)
                 }
             }
         }
