@@ -21,6 +21,7 @@ enum Theme {
     static let selectionTint = Color(hex: 0x0a84ff).opacity(0.20)
     static let chip = Color.white.opacity(0.06)
     static let warn = Color(hex: 0xff6a3d)
+    static let success = Color(hex: 0x34c759)
 
     // Radii (spec).
     static let rWindow: CGFloat = 13

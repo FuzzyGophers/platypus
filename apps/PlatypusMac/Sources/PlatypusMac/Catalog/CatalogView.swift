@@ -321,6 +321,7 @@ struct CatalogView: View {
                                 memory: ft60, radioName: radios.active?.name ?? "Radio",
                                 symbol: radios.active?.symbol ?? "dot.radiowaves.left.and.right",
                                 accent: radios.active?.accent ?? Theme.accent,
+                                maker: radios.active?.maker ?? "",
                                 selectedBank: $ft60Bank,
                                 onRead: { showingFt60Read = true },
                                 onWrite: {
@@ -330,7 +331,8 @@ struct CatalogView: View {
                                         status = "Read the radio first — Write sends back the captured image."
                                     }
                                 },
-                                onOpenBackup: openFt60Backup)
+                                onOpenBackup: openFt60Backup,
+                                onForget: { if let id = radios.activeID { radios.remove(id) } })
                         }
                     case .sdCard:
                         editorColumn
@@ -1143,10 +1145,8 @@ struct CatalogView: View {
 
     private var editorColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            sdCardHeaderBar
-            Divider().overlay(Theme.border)
-            // Always-visible list selector so you can switch lists without going back.
-            listBar.padding(14)
+            // The unified radio card — header + Open/Read/Write + the list chooser (detail slot).
+            sdCardCard.padding(14)
             Divider().overlay(Theme.border)
 
             if cardMount == nil {
@@ -1183,28 +1183,43 @@ struct CatalogView: View {
         .background(Theme.bg2)
     }
 
-    /// The SD-card editor's action bar — the same Read / Write / Open-Backup shape as the FT-60
-    /// header, with the card verbs (Read = mount, Write = save changes, Open Backup = a backup
-    /// folder). Always visible so loading + saving live in one consistent place per radio.
-    private var sdCardHeaderBar: some View {
-        RadioActionBar(
+    /// The SD-card radio card — header + Open/Read/Write, with the list chooser + capacity in the
+    /// shared detail slot. Read = mount, Write = save changes, Open = a backup folder. The gear +
+    /// Eject collapse into the single ⋯ menu (`cardMenuItems`).
+    private var sdCardCard: some View {
+        RadioCardView(
             symbol: radios.active?.symbol ?? "sdcard",
-            accent: radios.active?.accent ?? Theme.accent,
+            tint: cardMount == nil ? .idle : .sdCard,
             name: radios.active?.name ?? "SDS150", subtitle: sdCardSubtitle,
+            connected: cardMount != nil,
             warning: cardModified ? "modified — eject before reconnecting" : nil,
-            onSettings: { showDisplayEditor = true }, settingsDisabled: cardMount == nil,
+            menuItems: cardMenuItems,
             onOpen: openBackupCard, onRead: openCard, onWrite: { saveAll() },
             writeDisabled: cardMount == nil || !anyPending || !cardBackedUp,
             writeHelp: cardMount != nil && anyPending && !cardBackedUp
-                ? "Back up the card first, then Write" : "Save changes to the card",
-            onEject: ejectCard, ejectDisabled: cardMount == nil, ejectModified: cardModified,
-            menuItems: cardMenuItems)
+                ? "Back up the card first, then Write" : "Save changes to the card"
+        ) {
+            listBar
+        }
     }
 
-    /// The SD-card overflow (⋯) menu — card ops available when a card's loaded.
+    /// The SD-card overflow (⋯) menu — the former gear (Settings) + Eject collapse here, plus
+    /// Restore (when a card's loaded) and Forget. Read already auto-backs-up, so no manual "Back up".
     private var cardMenuItems: [RadioBarMenuItem] {
-        guard cardMount != nil else { return [] }
-        return [RadioBarMenuItem(title: "Restore…") { restoreCard() }]
+        var items: [RadioBarMenuItem] = [
+            RadioBarMenuItem(title: "Settings…", disabled: cardMount == nil) { showDisplayEditor = true },
+            RadioBarMenuItem(title: "Eject", disabled: cardMount == nil) { ejectCard() },
+        ]
+        if cardMount != nil {
+            items.append(.divider)
+            items.append(RadioBarMenuItem(title: "Restore…") { restoreCard() })
+        }
+        if let id = radios.activeID {
+            items.append(.divider)
+            items.append(RadioBarMenuItem(title: "Forget \(radios.active?.name ?? "radio")",
+                                          role: .destructive) { radios.remove(id) })
+        }
+        return items
     }
 
     /// Subtitle for the SD-card header: the card/volume + list count + live-vs-backup, or "no card".

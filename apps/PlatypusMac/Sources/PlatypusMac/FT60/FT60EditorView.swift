@@ -32,6 +32,8 @@ struct FT60EditorView: View {
     /// catalog's radio switcher rather than hardcoding a model.
     var symbol: String = "dot.radiowaves.left.and.right"
     var accent: Color = Theme.accent
+    /// The active radio's maker (from the core registry) — the card's connection subtitle.
+    var maker: String = ""
     /// The bank location-first adds land in (nil = Unbanked / All Memories). Also the
     /// highlighted "add target" section.
     @Binding var selectedBank: Int?
@@ -39,6 +41,8 @@ struct FT60EditorView: View {
     var onWrite: () -> Void
     /// Open a saved backup image into the editor (editable, then Write).
     var onOpenBackup: () -> Void
+    /// Remove this radio from the owned set (⋯ → Forget).
+    var onForget: () -> Void = {}
 
     @State private var detailsSlot: Int?
     /// The channel-form sheet: add a new channel, or edit an existing one.
@@ -88,10 +92,15 @@ struct FT60EditorView: View {
         }
     }
 
-    /// Header subtitle reflecting real state: empty, or "N channels".
-    private var subtitle: String {
+    /// The clone-state line shown in the card's detail slot: empty, or "N channels".
+    private var cloneInfoLine: some View {
         let n = memory.channels.count
-        return n == 0 ? "clone · empty" : "clone · \(n) channel\(n == 1 ? "" : "s")"
+        let state = n == 0 ? "empty" : "\(n) channel\(n == 1 ? "" : "s")"
+        return HStack(spacing: 8) {
+            Image(systemName: "cable.connector").font(.system(size: 12)).foregroundStyle(Theme.fg3)
+            Text("Clone mode · \(state)").font(.system(size: 12)).foregroundStyle(Theme.fg2).lineLimit(1)
+            Spacer(minLength: 0)
+        }
     }
 
     /// Shown when the memory has no channels — invites a Read (or hand-add) instead of
@@ -116,12 +125,21 @@ struct FT60EditorView: View {
     // MARK: - Header (device + clone actions)
 
     private var headerBar: some View {
-        RadioActionBar(
-            symbol: symbol, accent: accent, name: radioName, subtitle: subtitle,
-            onSettings: { showSettings = true }, settingsDisabled: memory.settings.isEmpty,
+        RadioCardView(
+            symbol: symbol, tint: .connected, name: radioName,
+            subtitle: maker.isEmpty ? "Serial clone" : "Serial clone · \(maker)",
+            menuItems: [
+                RadioBarMenuItem(title: "Settings…", disabled: memory.settings.isEmpty) { showSettings = true },
+                .divider,
+                RadioBarMenuItem(title: "Forget \(radioName)", role: .destructive, action: onForget),
+            ],
             onOpen: onOpenBackup, onRead: onRead, onWrite: onWrite,
-            writeHelp: "Clone the edited image to the radio")
-            .sheet(isPresented: $showSettings) { FT60SettingsSheet(memory: memory) }
+            writeHelp: "Clone the edited image to the radio"
+        ) {
+            cloneInfoLine
+        }
+        .padding(14)
+        .sheet(isPresented: $showSettings) { FT60SettingsSheet(memory: memory) }
     }
 
     // MARK: - A section (All Memories / a bank / Unbanked)
