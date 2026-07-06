@@ -18,5 +18,5 @@ crate-type = ["staticlib", "cdylib"]
 # dep is `platypus-serial` (our termios transport) so the FT-60 clone read can be driven
 # from the app; the core itself stays dependency-free.
 [dependencies]
-platypus-core = { path = "../platypus-core", version = "0.1.0" }
-platypus-serial = { path = "../platypus-serial", version = "0.1.0" }
+platypus-core = { path = "../platypus-core", version = "0.2.0" }
+platypus-serial = { path = "../platypus-serial", version = "0.2.0" }

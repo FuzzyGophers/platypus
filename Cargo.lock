@@ -40,11 +40,11 @@ dependencies = [
 
 [[package]]
 name = "platypus-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "platypus-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "platypus-core",
  "platypus-serial",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "platypus-serial"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nix",
  "platypus-core",

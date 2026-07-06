@@ -10,8 +10,8 @@
     <!-- CFBundleVersion / CFBundleShortVersionString are stamped from the workspace
          Cargo.toml [workspace.package] version by `just app::bundle`; these literals are
          only a standalone-valid baseline. -->
-    <key>CFBundleVersion</key><string>0.1.0</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>0.2.0</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
