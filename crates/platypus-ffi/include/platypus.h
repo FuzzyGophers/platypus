@@ -123,6 +123,56 @@ char *platypus_ft60_options_json(void);
 char *platypus_service_types_json(void);
 
 /*
+ The card's current display customization as JSON:
+ `{ "globals":[{key,label,value,options:[str]}],
+    "items":[{dispOptId,dispLayoutId,tokens:[str]}],
+    "colors":[{dispColorId,colorLayoutId,pairs:[{text,back}]}] }`.
+ Null if no supported card / no `profile.cfg` is found there.
+
+ # Safety
+ `card_mount` must be a valid NUL-terminated C string.
+ */
+char *platypus_display_config_json(const char *card_mount);
+
+/*
+ Apply an edit script to the card's `profile.cfg` and commit (write + fsync + delete
+ `app_data.cfg`). The caller must still **eject**. Returns null on success, or an error string.
+
+ `edits` is one edit per line (`\n`), tab-separated:
+ - `G<TAB>key<TAB>value` — a global (DisplayOption/Backlight) setting
+ - `I<TAB>dispOptId<TAB>dispLayoutId<TAB>index<TAB>token` — an item assignment
+ - `C<TAB>dispColorId<TAB>colorLayoutId<TAB>index<TAB>text<TAB>back` — a color pair
+
+ Unknown/blank lines are ignored; the setters are change-gated, so applying an unchanged script
+ re-encodes the file byte-for-byte (only untouched-record preservation, never a rewrite of what
+ we don't own).
+
+ # Safety
+ `card_mount`/`edits` must be valid NUL-terminated C strings.
+ */
+char *platypus_display_apply(const char *card_mount, const char *edits);
+
+/*
+ The allowed color palette: `[{name,hex}]` (147 colors, the display spec's `Color` sheet).
+ */
+char *platypus_display_palette_json(void);
+
+/*
+ The item vocabularies per screen area: `[{dispOptId,label,tokens:[str]}]`.
+ */
+char *platypus_display_items_json(void);
+
+/*
+ The seven display modes: `[{name,dispLayoutId,colorLayoutId}]`.
+ */
+char *platypus_display_modes_json(void);
+
+/*
+ The color-element groups: `[{dispColorId,elements:[str]}]` (nominal element names per group).
+ */
+char *platypus_display_color_groups_json(void);
+
+/*
  Parse an HPDB `.hpd`/`.cfg` file at `path`. Returns null on any failure.
 
  # Safety

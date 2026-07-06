@@ -169,6 +169,8 @@ struct CatalogView: View {
     @State private var showingFt60Read = false
     /// Guided "write to radio" sheet (clone-out; gated on a captured image).
     @State private var showingFt60Write = false
+    /// SDS150 display-customization editor (gear popup).
+    @State private var showDisplayEditor = false
     /// Browse data sources (merge model). HPDB real; RepeaterBook/RR stubs until their
     /// network backends land. Separate axis from the target radio.
     @StateObject private var dataSources = DataSourceStore()
@@ -348,6 +350,11 @@ struct CatalogView: View {
         .confirmationDialog("Choose a card", isPresented: $showingCardPicker, titleVisibility: .visible) {
             ForEach(detectedCards) { card in
                 Button(card.volumeName) { openLibrary(path: card.hpdbDir, title: "Loading the card") }
+            }
+        }
+        .sheet(isPresented: $showDisplayEditor) {
+            DisplaySettingsSheet(cardMount: cardMount ?? "", isLive: isLiveCard) { edits in
+                applyDisplayEdits(edits)
             }
         }
         .sheet(item: $addingSource) { kind in
@@ -1185,6 +1192,7 @@ struct CatalogView: View {
             accent: radios.active?.accent ?? Theme.accent,
             name: radios.active?.name ?? "SDS150", subtitle: sdCardSubtitle,
             warning: cardModified ? "modified — eject before reconnecting" : nil,
+            onSettings: { showDisplayEditor = true }, settingsDisabled: cardMount == nil,
             onOpen: openBackupCard, onRead: openCard, onWrite: { saveAll() },
             writeDisabled: cardMount == nil || !anyPending || !cardBackedUp,
             writeHelp: cardMount != nil && anyPending && !cardBackedUp
@@ -2557,6 +2565,38 @@ struct CatalogView: View {
     }
 
     // MARK: - Card backup / eject (header)
+
+    /// Write display-customization edits to the card's `profile.cfg` (only the four display records
+    /// change; everything else is preserved). Wrapped in the shared operation overlay; deletes
+    /// `app_data.cfg` in the core and marks the card modified so the eject reminder shows.
+    private func applyDisplayEdits(_ edits: [String]) {
+        guard let mount = cardMount else { return }
+        let live = isLiveCard
+        opTitle = live ? "Writing display settings" : "Saving to backup"
+        opIcon = "paintpalette"
+        opNote = live
+            ? "Updating profile.cfg on the card. Don't disconnect it."
+            : "Updating profile.cfg in the backup folder."
+        opToken = nil  // a config write is not cancelable
+        opPhase = live ? "Writing…" : "Saving…"
+        opFraction = 0
+        opActive = true
+        cardStatus = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let err = DisplayBridge.apply(cardMount: mount, edits: edits)
+            DispatchQueue.main.async {
+                opActive = false
+                if let err {
+                    cardStatus = CardBanner(text: "Display write failed: \(err)", level: .error)
+                } else if live {
+                    cardModified = true  // a physical card was changed — eject before reconnecting
+                    flashStatus("Display settings written — eject before reconnecting.", level: .success)
+                } else {
+                    flashStatus("Display settings saved to the backup.", level: .success)
+                }
+            }
+        }
+    }
 
     /// Back up the card to the managed backups folder. `auto` is the quiet variant fired on Read
     /// (no Finder reveal, gentler success flash), mirroring the FT-60's auto-backup on read.

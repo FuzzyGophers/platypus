@@ -191,6 +191,251 @@ pub extern "C" fn platypus_service_types_json() -> *mut c_char {
     })
 }
 
+// ---- SDS150 display customization (profile.cfg: DisplayOption/Backlight/DispOptItems/DispColors) ----
+
+/// The card's current display customization as JSON:
+/// `{ "globals":[{key,label,value,options:[str]}],
+///    "items":[{dispOptId,dispLayoutId,tokens:[str]}],
+///    "colors":[{dispColorId,colorLayoutId,pairs:[{text,back}]}] }`.
+/// Null if no supported card / no `profile.cfg` is found there.
+///
+/// # Safety
+/// `card_mount` must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn platypus_display_config_json(card_mount: *const c_char) -> *mut c_char {
+    ffi_guard(ptr::null_mut(), move || unsafe {
+        let Some(mount) = cstr_to_str(card_mount) else {
+            return ptr::null_mut();
+        };
+        let mount = Path::new(mount);
+        let Some(profile) = detect_card(mount) else {
+            return ptr::null_mut();
+        };
+        let Ok(cfg) = card::read_display_config(mount, profile) else {
+            return ptr::null_mut();
+        };
+
+        let mut out = String::from("{\"globals\":[");
+        for (i, g) in cfg.globals().iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"key\":");
+            push_json_string(&mut out, &g.key);
+            out.push_str(",\"label\":");
+            push_json_string(&mut out, &g.label);
+            out.push_str(",\"value\":");
+            push_json_string(&mut out, &g.value);
+            out.push_str(",\"options\":[");
+            for (j, o) in g.options.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                push_json_string(&mut out, o);
+            }
+            out.push_str("]}");
+        }
+        out.push_str("],\"items\":[");
+        for (i, it) in cfg.items().iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"dispOptId\":");
+            out.push_str(&it.disp_opt_id.to_string());
+            out.push_str(",\"dispLayoutId\":");
+            out.push_str(&it.disp_layout_id.to_string());
+            out.push_str(",\"tokens\":[");
+            for (j, t) in it.tokens.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                push_json_string(&mut out, t);
+            }
+            out.push_str("]}");
+        }
+        out.push_str("],\"colors\":[");
+        for (i, c) in cfg.colors().iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"dispColorId\":");
+            out.push_str(&c.disp_color_id.to_string());
+            out.push_str(",\"colorLayoutId\":");
+            out.push_str(&c.color_layout_id.to_string());
+            out.push_str(",\"pairs\":[");
+            for (j, p) in c.pairs.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str("{\"text\":");
+                push_json_string(&mut out, &p.text);
+                out.push_str(",\"back\":");
+                push_json_string(&mut out, &p.back);
+                out.push('}');
+            }
+            out.push_str("]}");
+        }
+        out.push_str("]}");
+        to_c_string(out)
+    })
+}
+
+/// Apply an edit script to the card's `profile.cfg` and commit (write + fsync + delete
+/// `app_data.cfg`). The caller must still **eject**. Returns null on success, or an error string.
+///
+/// `edits` is one edit per line (`\n`), tab-separated:
+/// - `G<TAB>key<TAB>value` — a global (DisplayOption/Backlight) setting
+/// - `I<TAB>dispOptId<TAB>dispLayoutId<TAB>index<TAB>token` — an item assignment
+/// - `C<TAB>dispColorId<TAB>colorLayoutId<TAB>index<TAB>text<TAB>back` — a color pair
+///
+/// Unknown/blank lines are ignored; the setters are change-gated, so applying an unchanged script
+/// re-encodes the file byte-for-byte (only untouched-record preservation, never a rewrite of what
+/// we don't own).
+///
+/// # Safety
+/// `card_mount`/`edits` must be valid NUL-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn platypus_display_apply(
+    card_mount: *const c_char,
+    edits: *const c_char,
+) -> *mut c_char {
+    ffi_guard(to_c_string("internal error".to_string()), move || unsafe {
+        let err = |m: &str| to_c_string(m.to_string());
+        let Some(mount) = cstr_to_str(card_mount) else {
+            return err("invalid card path");
+        };
+        let mount = Path::new(mount);
+        let Some(profile) = detect_card(mount) else {
+            return err("no supported scanner card found at that path");
+        };
+        let mut cfg = match card::read_display_config(mount, profile) {
+            Ok(c) => c,
+            Err(e) => return err(&e.to_string()),
+        };
+        for line in cstr_to_str(edits).unwrap_or("").lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            match f.as_slice() {
+                ["G", key, value] => {
+                    cfg.set_global(key, value);
+                }
+                ["I", oid, lid, idx, token] => {
+                    if let (Ok(o), Ok(l), Ok(i)) =
+                        (oid.parse::<u64>(), lid.parse::<u64>(), idx.parse::<usize>())
+                    {
+                        cfg.set_item_token(o, l, i, token);
+                    }
+                }
+                ["C", cid, lid, idx, text, back] => {
+                    if let (Ok(c), Ok(l), Ok(i)) =
+                        (cid.parse::<u64>(), lid.parse::<u64>(), idx.parse::<usize>())
+                    {
+                        cfg.set_color(c, l, i, text, back);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match card::commit_display_config(mount, profile, &cfg) {
+            Ok(()) => ptr::null_mut(),
+            Err(e) => err(&e.to_string()),
+        }
+    })
+}
+
+/// The allowed color palette: `[{name,hex}]` (147 colors, the display spec's `Color` sheet).
+#[no_mangle]
+pub extern "C" fn platypus_display_palette_json() -> *mut c_char {
+    ffi_guard(ptr::null_mut(), move || {
+        let mut out = String::from("[");
+        for (i, (name, hex)) in platypus_core::display::COLOR_PALETTE.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"name\":");
+            push_json_string(&mut out, name);
+            out.push_str(",\"hex\":");
+            push_json_string(&mut out, hex);
+            out.push('}');
+        }
+        out.push(']');
+        to_c_string(out)
+    })
+}
+
+/// The item vocabularies per screen area: `[{dispOptId,label,tokens:[str]}]`.
+#[no_mangle]
+pub extern "C" fn platypus_display_items_json() -> *mut c_char {
+    ffi_guard(ptr::null_mut(), move || {
+        let mut out = String::from("[");
+        for (i, area) in platypus_core::display::ITEM_AREAS.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"dispOptId\":");
+            out.push_str(&area.disp_opt_id.to_string());
+            out.push_str(",\"label\":");
+            push_json_string(&mut out, area.label);
+            out.push_str(",\"tokens\":[");
+            for (j, t) in area.tokens.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                push_json_string(&mut out, t);
+            }
+            out.push_str("]}");
+        }
+        out.push(']');
+        to_c_string(out)
+    })
+}
+
+/// The seven display modes: `[{name,dispLayoutId,colorLayoutId}]`.
+#[no_mangle]
+pub extern "C" fn platypus_display_modes_json() -> *mut c_char {
+    ffi_guard(ptr::null_mut(), move || {
+        let mut out = String::from("[");
+        for (i, m) in platypus_core::display::LAYOUT_MODES.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"name\":");
+            push_json_string(&mut out, m.name);
+            out.push_str(",\"dispLayoutId\":");
+            out.push_str(&m.disp_layout_id.to_string());
+            out.push_str(",\"colorLayoutId\":");
+            out.push_str(&m.color_layout_id.to_string());
+            out.push('}');
+        }
+        out.push(']');
+        to_c_string(out)
+    })
+}
+
+/// The color-element groups: `[{dispColorId,elements:[str]}]` (nominal element names per group).
+#[no_mangle]
+pub extern "C" fn platypus_display_color_groups_json() -> *mut c_char {
+    ffi_guard(ptr::null_mut(), move || {
+        let mut out = String::from("[");
+        for (i, g) in platypus_core::display::COLOR_GROUPS.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"dispColorId\":");
+            out.push_str(&g.disp_color_id.to_string());
+            out.push_str(",\"elements\":[");
+            for (j, e) in g.elements.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                push_json_string(&mut out, e);
+            }
+            out.push_str("]}");
+        }
+        out.push(']');
+        to_c_string(out)
+    })
+}
+
 // ---- lifecycle ----
 
 /// Parse an HPDB `.hpd`/`.cfg` file at `path`. Returns null on any failure.
@@ -3481,6 +3726,70 @@ mod tests {
             assert!(!json2.contains("Alpha"));
             assert!(json2.contains("Bravo"));
             platypus_string_free(j2);
+
+            platypus_favorites_free(fav);
+            platypus_close_hpdb(src);
+            std::fs::remove_dir_all(&base).ok();
+        }
+    }
+
+    #[test]
+    fn display_config_read_apply_and_tables() {
+        unsafe {
+            // Static tables need no card.
+            let pj = platypus_display_palette_json();
+            let palette = CStr::from_ptr(pj).to_str().unwrap();
+            assert!(palette.contains("\"name\":\"Aqua\",\"hex\":\"00fbf7\""));
+            platypus_string_free(pj);
+            for f in [
+                platypus_display_items_json(),
+                platypus_display_modes_json(),
+                platypus_display_color_groups_json(),
+            ] {
+                assert!(!f.is_null());
+                platypus_string_free(f);
+            }
+
+            // Build a throwaway card: f_list.cfg (so detect_card works) + a synthetic profile.cfg.
+            let base =
+                std::env::temp_dir().join(format!("platypus-display-ffi-{}", std::process::id()));
+            std::fs::create_dir_all(base.join("BCDx36HP")).unwrap();
+            let src = platypus_open_hpdb(sample("s_000090.hpd").as_ptr());
+            let sel = CString::new("all").unwrap();
+            let fav = platypus_favorites_build(src, sel.as_ptr(), 0.0, 0.0, 0.0, false, false);
+            let mount = CString::new(base.to_str().unwrap()).unwrap();
+            let a = CString::new("Alpha").unwrap();
+            assert!(platypus_favorites_commit(fav, mount.as_ptr(), 1, a.as_ptr()).is_null());
+            let src_profile =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/synthetic/profile.cfg");
+            std::fs::copy(&src_profile, base.join("BCDx36HP/profile.cfg")).unwrap();
+
+            // Read the current display config.
+            let j = platypus_display_config_json(mount.as_ptr());
+            assert!(!j.is_null());
+            let json = CStr::from_ptr(j).to_str().unwrap().to_string();
+            assert!(
+                json.contains("\"key\":\"ColorMode\",\"label\":\"Color mode\",\"value\":\"COLOR\"")
+            );
+            assert!(json.contains("\"dispOptId\":1"));
+            assert!(json.contains("\"text\":\"ff4600\",\"back\":\"000000\""));
+            platypus_string_free(j);
+
+            // Apply an edit script: change ColorMode, one item token, one color.
+            let edits =
+                CString::new("G\tColorMode\tBLACK\nI\t1\t1\t1\tTGID\nC\t1\t1\t0\tffffff\t000000")
+                    .unwrap();
+            assert!(platypus_display_apply(mount.as_ptr(), edits.as_ptr()).is_null());
+
+            // Re-read: the edits stuck, and the non-display BandDefault record survived.
+            let j2 = platypus_display_config_json(mount.as_ptr());
+            let json2 = CStr::from_ptr(j2).to_str().unwrap().to_string();
+            assert!(json2
+                .contains("\"key\":\"ColorMode\",\"label\":\"Color mode\",\"value\":\"BLACK\""));
+            assert!(json2.contains("\"text\":\"ffffff\",\"back\":\"000000\""));
+            platypus_string_free(j2);
+            let raw = std::fs::read_to_string(base.join("BCDx36HP/profile.cfg")).unwrap();
+            assert!(raw.contains("BandDefault\t1\t25000000\t54000000\tAM"));
 
             platypus_favorites_free(fav);
             platypus_close_hpdb(src);

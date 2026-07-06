@@ -2,17 +2,6 @@
 
 Tracked future work. Run `just check` before pushing (see `CLAUDE.md`).
 
-## Engineering / hardening
-
-- **Graceful FFI panic recovery.** The boundary is sound today: the core is written not to
-  panic on malformed input, `extern "C"` aborts on unwind (Rust ≥ 1.81), and release sets
-  `panic = "abort"`. A future refinement is to wrap each `extern "C"` entry point in
-  `catch_unwind` so an unexpected panic degrades to the null/`0` return (a UI error) instead of
-  aborting the app. Low priority while the core stays panic-free.
-- **Unify the core error type.** `core::Error` (`error.rs`) covers only the parse path; card
-  read/write returns `std::io::Error`. The FFI stringifies both, so callers see consistent
-  messages, but a single crate error type would be cleaner.
-
 ## Release / distribution
 
 - **Sign + notarize the macOS app.** `just app::bundle` has a `_sign` seam (runs `codesign`
@@ -23,19 +12,12 @@ Tracked future work. Run `just check` before pushing (see `CLAUDE.md`).
 
 ## UI / data
 
-- **Map: "center on me"** (follow-up to the ZIP/place jump, which is done). Add a
-  current-location button using `CLLocationManager`; wire location permission by adding
-  `NSLocationWhenInUseUsageDescription` to `apps/PlatypusMac/Info.plist`. (The app is
-  unsandboxed, so no sandbox entitlement is needed.)
-
-- **Display customization (SD write, new area).** The SDS format supports customizing the
-  on-screen display, in the scanner's **settings config** (not HPDB/favorites): `DispOptItems`
-  (which data items appear per display layout), `DispColors` (per-item text/background colors
-  from a named palette), `DisplayOption` (Mot/EDACS TGID format DEC/HEX, Color Mode, 3-line
-  mode), `Backlight`. A natural "manager" feature — theme the display, pick what shows. To
-  build: identify + parse the settings config file; add a settings editor gated by the
-  byte-exact round trip. **Spec-ready**: record formats, layout modes, item-code tables, and
-  the 147-color palette are in [`docs/radios/sds150-display.md`](docs/radios/sds150-display.md).
+- **Display customization — verify + polish.** The editor is in: a core round-trip module over
+  `profile.cfg`, the FFI, and an SDS150 gear popup (layout-mode picker, per-area item assignment,
+  per-element colors from the 147-color palette, live per-mode preview). Remaining: hardware-verify
+  the `DisplayOption` col-11 label and the `Backlight` fields, and make the per-mode preview
+  pixel-faithful with exact per-element colors (read from the on-device color menu). Spec + record
+  details in [`docs/radios/sds150-display.md`](docs/radios/sds150-display.md).
 
 - **RepeaterBook.com provider (import source #3).** A free JSON API of amateur repeaters —
   the natural data source for the ham/**FT-60** flow (conventional freq + offset + CTCSS/DCS
@@ -68,32 +50,18 @@ Tracked future work. Run `just check` before pushing (see `CLAUDE.md`).
 
 Read / write / edit-and-write and the full standard-memory record are **done and byte-exact**
 (name, freq, mode FM/NFM/AM, tone + sub-kind, duplex ±, offset, split tx-freq, power, step,
-skip, banks). PMS band-edge memories decode + round-trip. Remaining FT-60 capabilities to map:
+skip, banks). PMS band-edge memories decode, edit, and round-trip (the pair editor is in;
+interleaved lower/upper pairing confirmed on hardware). Remaining FT-60 capabilities to map:
 
-- **PMS band-edge editing UI.** The codec reads/writes the 100 records (50 L/U pairs at
-  `0x40C8`) and round-trips them; the app only **displays** them (read-only "Scan edges"
-  section). Add a pair editor once a **programmed sample** confirms the interleaved lower/upper
-  pairing (the owner's card has none set, so the ordering is inferred). Core support is in
-  `Ft60Image::pms_edges` / `apply_pms`.
-- **Power Mid/Low calibration.** Index `0` = High is confirmed on hardware; `1`/`2` = Mid/Low
-  are assumed from the documented bit order and **not yet exercised** (all captured channels are
-  High). Verify
-  by setting one channel to Mid then Low on the radio, Read, and check the 2-bit field. Writes
-  are change-gated, so unchanged channels are safe regardless.
-- **Verify the single-point calibrations.** `offset` is 50 kHz-per-step, calibrated from the one
-  value seen (600 kHz / 2 m); confirm with a **70 cm repeater (5 MHz)**. **Split duplex +
-  tx_freq** is implemented but unvalidated (no split channel in captures) — confirm with one.
-- **Tone cross-modes** (`Tone->DTCS`, `DTCS->Tone`) carry only the primary CTCSS/DCS value; the
-  secondary collapses if such a channel is *edited* (it round-trips verbatim when untouched).
-  Carry both values for full fidelity.
-- **Name charset — symbols.** `0x00–0x24` (digits / A–Z / space) are mapped; codes above `0x24`
-  (punctuation/symbols) render as space and won't round-trip if a name using them is edited. Map
-  the rest of the charset (`charset_byte`/`encode_charset` in `device/ft60.rs`).
-- **Non-channel radio config (a separate "radio settings editor").** The clone image also holds
-  home channels (5), NOAA weather (10), DTMF autodialer memories, set-mode/menu settings (APO,
-  squelch, lamp, beep, ARTS, busy-lockout…), and VFO / one-touch / EPCS paging. All are
-  **preserved verbatim** by the round-trip today but not modeled or editable — a large, distinct
-  feature from channel programming. Facts live in
+- **Split duplex + tx_freq** is implemented but **unvalidated** — the FT-60 front panel can't set
+  an odd-split, so there's no way to program a hardware sample. Round-trips defensively; confirm if
+  a split image ever turns up. (Power Mid/Low and the 70 cm 5 MHz offset are now hardware-validated
+  via a write-back round-trip — see [`docs/radios/ft60.md`](docs/radios/ft60.md).)
+- **Non-channel radio config (extend the radio settings editor).** The set-mode/menu settings
+  (APO, squelch, lamp, beep, ARTS, busy-lockout…) are now modeled + editable via the gear dialog.
+  Still preserved-verbatim-only, not yet modeled: home channels (5), NOAA weather (10), DTMF
+  autodialer memories, and VFO / one-touch / EPCS paging — a distinct feature from channel
+  programming. Facts live in
   [`docs/radios/ft60.md`](docs/radios/ft60.md); codec in
   [`crates/platypus-core/src/device/ft60.rs`](crates/platypus-core/src/device/ft60.rs).
 

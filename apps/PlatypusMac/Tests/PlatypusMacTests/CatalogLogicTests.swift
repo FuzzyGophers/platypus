@@ -125,6 +125,40 @@ final class SdCardSubtitleTests: XCTestCase {
     }
 }
 
+/// SDS150 display customization — core-sourced option tables + the edit-script encoder.
+final class DisplayCustomizationTests: XCTestCase {
+    func testOptionTablesFromCore() {
+        let o = DisplayOptions.shared
+        XCTAssertEqual(o.palette.count, 147)                 // the full color palette
+        XCTAssertEqual(o.palette.first { $0.name == "Aqua" }?.hex, "00fbf7")
+        XCTAssertEqual(o.modes.count, 7)                     // the seven layout modes
+        XCTAssertEqual(o.areas.count, 4)                     // four screen areas
+        XCTAssertEqual(o.colorGroups.count, 7)               // seven color groups
+        // The Simple-Conventional mode maps to item layout 1 / color layout 1.
+        XCTAssertEqual(o.modes.first { $0.name == "Simple Conventional" }?.colorLayoutId, 1)
+    }
+
+    func testPaletteHexParsesToColor() {
+        // Sanity: a palette hex string is a valid 6-hex value.
+        XCTAssertEqual(UInt32("ff4600", radix: 16), 0xff4600)
+    }
+
+    func testEditScriptEncoding() {
+        let data = DisplayConfigData(
+            globals: [DisplayGlobal(key: "ColorMode", label: "Color mode", value: "BLACK", options: ["COLOR", "BLACK"])],
+            items: [DisplayItemGroup(dispOptId: 1, dispLayoutId: 1, tokens: ["FL_Name", "TGID"])],
+            colors: [DisplayColorGroup(dispColorId: 1, colorLayoutId: 1,
+                                       pairs: [DisplayColorPair(text: "ffffff", back: "000000")])])
+        let script = DisplayEditModel.editScript(for: data)
+        XCTAssertEqual(script, [
+            "G\tColorMode\tBLACK",
+            "I\t1\t1\t0\tFL_Name",
+            "I\t1\t1\t1\tTGID",
+            "C\t1\t1\t0\tffffff\t000000",
+        ])
+    }
+}
+
 /// The map's radius→camera-span framing math (shared by the ZIP jump and "center on me").
 final class MapFramingTests: XCTestCase {
     func testSpanScalesWithRadius() {

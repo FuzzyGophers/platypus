@@ -43,12 +43,19 @@ Device reference: [`radios/sds150.md`](radios/sds150.md).
 ## Yaesu FT-60R (serial clone-image HT)
 
 - **Read / write over the serial clone cable**: the full 28,617-byte memory image, with
-  a byte-exact round-trip as the writer safety gate.
+  a byte-exact round-trip as the writer safety gate. **Every Read is backed up** — the raw
+  image is saved to the managed backups folder (fsync'd, in the core FFI) as an automatic
+  restore point before any editing.
 - **Edit any channel** — name, RX frequency, mode (FM/NFM/AM), tone (CTCSS/DCS + the full
-  tone-mode sub-kind), duplex (±/split), offset, TX frequency, power, tuning step, skip,
-  and multi-bank membership. Surgical, change-gated writes preserve everything not edited.
+  tone-mode sub-kind, including the cross modes), duplex (±/split), offset, TX frequency,
+  power, tuning step, skip, and multi-bank membership. Surgical, change-gated writes preserve
+  everything not edited.
 - **Add / delete channels and organize banks** (A–J), by hand or from the location-first
   catalog (conventional channels only — the HT can't use trunked systems).
-- **PMS band-edge memories**: decoded and shown (read-only display for now).
+- **Edit PMS band-edge memories** — the 50 scan-limit pairs (lower/upper + step), written
+  back through the same clone-out path.
+- **Edit set-mode settings** — the menu block (auto power-off, time-out timer, RF squelch,
+  control lock, DTMF delay/speed, ARTS beep, lamp, bell, battery saver), change-gated so the
+  reserved bits and unmodeled settings are preserved. Every Read is auto-backed-up first.
 
 Device reference: [`radios/ft60.md`](radios/ft60.md).

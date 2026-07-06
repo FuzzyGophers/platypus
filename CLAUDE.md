@@ -93,6 +93,19 @@ live in the device doc, e.g. [`docs/radios/sds150.md`](docs/radios/sds150.md).
   stays GPL-2.0-only.** Never copy a reference's *expression* (source code, its struct/enum
   definitions, string literals, algorithm structure), whatever its license. Codecs are
   **spec-derived**. See [`CREDITS.md`](CREDITS.md).
+- **Logical, atomic commits.** Each commit is one self-contained, understandable change —
+  small enough to review at a glance, with a message that explains it. Don't batch unrelated
+  edits together; split a large change into a sequence of focused commits. Every commit should
+  build and pass `just check` on its own. Commit (and push) only when asked; sign off with
+  `git commit -s`. **Message format:** a concise subject line, then a blank line, then a
+  bulleted body — one `- ` bullet per notable change:
+
+  ```
+  <subject: what this commit does>
+
+  - change X
+  - change Y
+  ```
 
 Current capabilities are listed in [`docs/capabilities.md`](docs/capabilities.md); planned
 work is tracked in [`TODO.md`](TODO.md).
