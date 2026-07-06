@@ -67,7 +67,7 @@ rust-check:
     else echo "· skip cargo-deny (brew install cargo-deny)"; fi
     if have lychee; then
       echo "▶ links"
-      mds=$(find . -name '*.md' -not -path './target/*' -not -path '*/.build/*' -not -path './.git/*')
+      mds=$(find . -name '*.md' -not -path './target/*' -not -path '*/.build/*' -not -path './.git/*' -not -path '*/node_modules/*')
       # shellcheck disable=SC2086
       lychee --offline --no-progress $mds
     else echo "· skip lychee (brew install lychee)"; fi
