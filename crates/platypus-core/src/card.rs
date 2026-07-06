@@ -272,6 +272,33 @@ pub fn f_list_path(card_mount: &Path, profile: &dyn SdCardProfile) -> PathBuf {
         .join(layout.favorites_list_cfg)
 }
 
+/// Path to the settings/display config `profile.cfg` (the display-customization file class).
+pub fn display_cfg_path(card_mount: &Path, profile: &dyn SdCardProfile) -> PathBuf {
+    model_root(card_mount, profile).join(profile.sd_layout().profile_cfg)
+}
+
+/// Read + parse the display customization from the card's `profile.cfg`.
+pub fn read_display_config(
+    card_mount: &Path,
+    profile: &dyn SdCardProfile,
+) -> crate::Result<crate::display::DisplayConfig> {
+    let bytes = fs::read(display_cfg_path(card_mount, profile))?;
+    crate::display::DisplayConfig::parse(&bytes)
+}
+
+/// Commit an edited display config to the card: write `profile.cfg` (fsync'd), then delete
+/// `app_data.cfg` (the spec CRITICAL RULE). The caller must still **eject**. Only the four display
+/// records were touched; every other record in `profile.cfg` is preserved verbatim.
+pub fn commit_display_config(
+    card_mount: &Path,
+    profile: &dyn SdCardProfile,
+    config: &crate::display::DisplayConfig,
+) -> crate::Result<()> {
+    write_synced(&display_cfg_path(card_mount, profile), &config.to_bytes())?;
+    delete_app_data(card_mount, profile)?;
+    Ok(())
+}
+
 /// Commit a favorites list to the card, the full safe write path:
 /// 1. write `favorites_lists/f_<slot>.hpd`,
 /// 2. register/replace its entry in `f_list.cfg` with `label`,

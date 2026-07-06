@@ -32,6 +32,8 @@ KNOWN_RECORDS = {
     "BandPlan_Mot", "BandPlan_P25", "DQKs_Status", "C-Group", "T-Group",
     "C-Freq", "TGID", "T-Freq", "Scanner", "DateModified", "StateInfo",
     "County", "CountyInfo", "LM", "LM_Frequency",
+    # profile.cfg display-customization records (see docs/radios/sds150-display.md).
+    "DisplayOption", "Backlight", "DispOptItems", "DispColors",
 }
 
 

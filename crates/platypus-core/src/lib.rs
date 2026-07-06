@@ -42,6 +42,7 @@
 pub mod card;
 pub mod county_geo;
 pub mod device;
+pub mod display;
 pub mod error;
 pub mod extract;
 pub mod favorites;

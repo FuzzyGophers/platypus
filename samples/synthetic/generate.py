@@ -15,6 +15,7 @@ Outputs (CRLF, tab-delimited, ASCII):
   f_example.hpd   favorites file incl. DQKs_Status / BandPlan_P25 / Rectangle
   hpdb.cfg        small county master (for CountyIndex)
   f_list.cfg      favorites index (F-List)
+  profile.cfg     settings/display config (DisplayOption/Backlight/DispOptItems/DispColors)
 """
 
 import os
@@ -192,8 +193,28 @@ def flist_file():
     write("f_list.cfg", r)
 
 
+# ---- profile.cfg : settings/display config (the display-customization file class) ----
+def profile_file():
+    # A rich settings file in reality; here just enough to exercise the four display records
+    # (DisplayOption / Backlight / DispOptItems / DispColors) plus one non-display record
+    # (BandDefault) to prove the display module preserves everything it doesn't own. No owner
+    # or location data. Column positions match a real SDS150 card.
+    r = header()
+    r.append(rec(5, {0: "BandDefault", 1: "1", 2: "25000000", 3: "54000000", 4: "AM"}))
+    r.append(rec(14, {0: "DisplayOption", 6: "DEC", 11: "On", 12: "AFS", 13: "COLOR"}))
+    r.append(rec(12, {0: "Backlight", 2: "High", 5: "30", 6: "40",
+                        7: "Off", 8: "Off", 9: "On", 10: "5", 11: "Infinite"}))
+    r.append(["DispOptItems", "DispOptId=1", "DispLayoutId=1", "FL_Name", "Empty", "Frequency"])
+    r.append(["DispOptItems", "DispOptId=3", "DispLayoutId=1", "ATT", "Bluetooth", "Day"])
+    r.append(["DispColors", "DispColorId=1", "ColorLayoutId=1",
+                "ff4600", "000000", "ff8800", "000000"])
+    r.append(["DispColors", "DispColorId=4", "ColorLayoutId=1", "e79473", "000000"])
+    write("profile.cfg", r)
+
+
 if __name__ == "__main__":
     state_file()
     favorites_file()
     hpdb_file()
     flist_file()
+    profile_file()

@@ -19,9 +19,10 @@ Four records drive the display. Formats (fields after the command):
     `Color Mode` `COLOR`/`BLACK`/`WHITE` · `ScnDisp Mode` `Mode 1`/`Mode 2` · `Upside_down`
     (no effect on SDS100). Other columns are `Reserve`.
 - **`Backlight`**: `FlashLed` `Off`/`On` · `SQ Light` `Off`/`5`/`10`/`15`/`OpenSquelch` ·
-  `Key Light` `15`/`30`/`60`/`120`/`Infinite`. (`Brightness`, `Key_Backlight`,
-  `Ext_PWR_Light`, `Dimmer_*` are SDS100/200-only.) If `FlashLed`=On, the Alert LED flashes
-  when the backlight turns off.
+  `Key Light` `15`/`30`/`60`/`120`/`Infinite`. If `FlashLed`=On, the Alert LED flashes when the
+  backlight turns off. (The V2.00 spec marks `Brightness`, `Key_Backlight`, `Ext_PWR_Light`,
+  `Dimmer_*` as SDS100/200-only, but a **real SDS150 card populates `Brightness` (`High`) and the
+  dimmer fields** too — so map columns from the card and preserve the ones you don't edit.)
 - **`DispOptItems`**: *which data items appear*, per option-area group and layout mode.
   Format: `DispOptItems DispOptId DispLayoutId OptItem1 OptItem2 … OptItemN`. Item order is
   fixed by `(DispOptId, DispLayoutId)`; each `OptItemK` is a **File token** from the item
@@ -73,8 +74,10 @@ The two ids select the display mode; note they differ between the option and col
   `Day` (Date), `P25Status`, `GPS`, `IFX`, `Modulation`, `P_Ch`, `PRI` (Priority Scan), `REC`,
   `REP` (Repeater Find), `Squelch`, `TdmaSlot`, `Time`, `Volume`, `LVL` (Volume Offset),
   `WxPRI`.
-- **`DispOptId=4` — Icon area:** positional `ICON1`…`ICON10` (the icon set is device-fixed;
-  the record lists which icon slots show).
+- **`DispOptId=4` — Small area (lower row):** shares the small-area vocabulary above. (The V2.00
+  spec sheet labels this the "Icon area," but a **real SDS150 card carries data-item tokens here**
+  — e.g. `Modulation`, `P_Ch`, `IFX`, `LVL`, `REC`, `GPS`, `PRI`, `CC`, `REP`, `SCR`, `WxPRI` —
+  not `ICON` slots; treat it as a second small-item row.)
 
 ## Color groups (`DispColors`)
 
@@ -150,10 +153,11 @@ Whitesmoke #eff3ef       Yellow #ffff00           Yellowgreen #94ca31
 
 ## Notes for building the feature
 
-- **New file class.** First step is to locate + parse the settings/config file that holds
-  these records (the model-folder config, alongside `app_data.cfg`/`discvery.cfg`), and add a
-  `SdCardProfile` hook for its path: the same "encode as data, not hard-coded" pattern as
-  `SdLayout`.
+- **New file class.** The records live in **`profile.cfg`** (the model-folder settings config,
+  alongside `app_data.cfg`/`discvery.cfg`) — confirmed against a real SDS150 card. `SdLayout`
+  already names it (`profile_cfg`), so no new path hook is needed; `card::display_cfg_path`
+  reuses it. `profile.cfg` also holds many non-display records (owner info, band defaults, tone
+  out, GPS, …) — the writer touches only the four display records and preserves the rest verbatim.
 - **Round-trip first.** Gate any writer behind the byte-exact round trip (read → decode →
   re-encode == original), exactly as for favorites; the records above have several `Reserve`
   fields to preserve verbatim (the "never overwrite what we don't know" rule).
