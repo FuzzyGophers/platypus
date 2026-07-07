@@ -6,6 +6,8 @@ struct PlatypusApp: App {
     // Installs the quit/close guard (warn on unsaved staged changes). See QuitGuard.swift.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    init() { LCDFonts.registerIfNeeded() }
+
     var body: some Scene {
         WindowGroup("Platypus") {
             CatalogView()

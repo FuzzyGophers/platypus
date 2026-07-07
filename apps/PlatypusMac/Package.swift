@@ -20,6 +20,10 @@ let package = Package(
         .executableTarget(
             name: "PlatypusMac",
             dependencies: ["CPlatypusFFI"],
+            resources: [
+                // Bundled OFL pixel fonts for the pixel-accurate SDS150 display preview.
+                .copy("Resources/Fonts")
+            ],
             linkerSettings: [
                 .unsafeFlags(rustLinkFlags)
             ]

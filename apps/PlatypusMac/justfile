@@ -53,6 +53,11 @@ bundle: _sync-header
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "{{here}}/.build/release/PlatypusMac" "$app/Contents/MacOS/PlatypusMac"
 
+    # SwiftPM resource bundle (the bundled OFL pixel fonts) → Resources/, so `Bundle.module`
+    # resolves it in the packaged app the same as it does in `swift run`.
+    resbundle="{{here}}/.build/release/PlatypusMac_PlatypusMac.bundle"
+    [ -d "$resbundle" ] && cp -R "$resbundle" "$app/Contents/Resources/"
+
     # App icon. Regenerate AppIcon.icns from the source art if missing (needs macOS sips +
     # iconutil), then drop it into the bundle's Resources.
     icns="{{here}}/AppIcon.icns"
