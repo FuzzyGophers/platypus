@@ -9,7 +9,7 @@ struct ContentView: View {
     @State private var hpdb: Hpdb?
     @State private var loadedPath: String?
     @State private var systems: [ScannerSystem] = []
-    @State private var status = "Open an HPDB .hpd file to begin."
+    @State private var status = "Open a Uniden .hpd file to begin."
 
     @State private var filter: FilterMode = .all
     @State private var countyText = ""

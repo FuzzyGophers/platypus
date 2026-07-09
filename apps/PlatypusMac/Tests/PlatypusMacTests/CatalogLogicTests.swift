@@ -93,11 +93,21 @@ final class DataSourceStoreTests: XCTestCase {
     func testDisableKeepsFolderButDropsFromActive() {
         let store = DataSourceStore()
         store.addHpdb(folderPath: "/tmp/MyCard/HPDB")
-        store.setHpdb(enabled: false)
+        store.toggleEnabled(.hpdb)
         XCTAssertEqual(store.activeCount, 0)                // no longer merges into the map
         XCTAssertEqual(store.source(.hpdb)?.folderPath, "/tmp/MyCard/HPDB")  // path retained
-        store.setHpdb(enabled: true)
+        store.toggleEnabled(.hpdb)
         XCTAssertEqual(store.activeCount, 1)
+    }
+
+    func testMultipleSourcesActiveAtOnce() {
+        // Multi-active: enabling a second configured source doesn't disable the first — they merge.
+        let store = DataSourceStore()
+        store.addHpdb(folderPath: "/tmp/MyCard/HPDB")
+        store.configure(.repeaterBook, token: "rbuapp_test")
+        XCTAssertEqual(store.activeCount, 2)
+        XCTAssertTrue(store.isActive(.hpdb))
+        XCTAssertTrue(store.isActive(.repeaterBook))
     }
 }
 

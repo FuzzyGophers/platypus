@@ -9,6 +9,8 @@ struct CatalogSystem: Codable, Identifiable {
     let name: String
     let kind: String
     let tech: String?
+    /// Home city — present for location-queryable sources (RadioReference); nil for HPDB.
+    var city: String? = nil
     /// Counties this system *covers* (location-first placement), not just its tags.
     let counties: [UInt64]
     /// AreaState ids — the Country → State level of the hierarchy.
@@ -17,9 +19,18 @@ struct CatalogSystem: Codable, Identifiable {
     let statewide: Bool
     let siteCount: Int
     let channelCount: Int
+    /// Which source produced this row — set by the aggregator (not decoded from the FFI).
+    var source: DataSourceKind = .hpdb
 
     var isTrunk: Bool { kind == "Trunk" }
     var multiCounty: Bool { counties.count > 1 || statewide }
+    /// Collision-safe identity across merged sources (`<source>:<local id>`) — the same local id can
+    /// occur in two sources, so browse state (expand/cache) keys on this, not `id`.
+    var compositeID: String { "\(source.rawValue):\(id)" }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, tech, city, counties, states, statewide, siteCount, channelCount
+    }
 }
 
 /// One channel under a system (talkgroup or conventional frequency).
@@ -33,6 +44,12 @@ struct CatalogChannel: Codable, Identifiable {
     let serviceType: Int?
     /// Raw audio-option field (CTCSS/DCS tone, P25 NAC, DMR color code…), or nil.
     var tone: String?
+    /// Which source produced this channel — set by the aggregator (not decoded from the FFI).
+    var source: DataSourceKind = .hpdb
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, tgid, freqHz, mode, serviceType, tone
+    }
 
     var isTalkgroup: Bool { kind == "Talkgroup" }
 
@@ -70,6 +87,12 @@ struct GeoSystem: Codable, Identifiable {
     let lat: Double
     let lon: Double
     let rangeMi: Double
+    /// Which source produced this pin — set by the aggregator (not decoded from the FFI).
+    var source: DataSourceKind = .hpdb
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, tech, serviceType, lat, lon, rangeMi
+    }
 }
 
 /// The catalog filter (mirrors the 1B sidebar). Encoded into the FFI's CSV params.
@@ -219,5 +242,49 @@ final class ScannerLibrary {
         defer { platypus_string_free(ptr) }
         let data = Data(bytes: ptr, count: strlen(ptr))
         return (try? JSONDecoder().decode([T].self, from: data)) ?? []
+    }
+}
+
+extension CatalogSystem {
+    /// A list row from a map pin — HPDB answers a location query via its radius geo, and its rows
+    /// (counts/counties) fill in when the system is drilled.
+    init(from geo: GeoSystem) {
+        self.init(
+            id: geo.id, name: geo.name, kind: geo.kind, tech: geo.tech, city: nil,
+            counties: [], states: [], statewide: false, siteCount: 0, channelCount: 0,
+            source: geo.source)
+    }
+}
+
+/// HPDB (a loaded Sentinel library) as a universal browse source: it answers a location by scoping its
+/// loaded data to the radius; its channels drill directly (no category level).
+extension ScannerLibrary: BrowseSource {
+    var sourceKind: DataSourceKind { .hpdb }
+    var capabilities: SourceCapabilities { [.geoHierarchy, .radiusAdd, .addToRadio] }
+
+    func systems(at location: BrowseLocation, _ filter: FilterState) -> [CatalogSystem] {
+        geo(at: location, filter).map(CatalogSystem.init(from:))
+    }
+
+    func channels(system: String, _ filter: FilterState) -> [CatalogChannel] {
+        channels(systemID: system, filter)
+    }
+
+    func categories(system: String, includeAll: Bool) -> [BrowseCategory]? { nil }
+
+    func categoryChannels(system: String, category: Int, _ filter: FilterState) -> [CatalogChannel] {
+        []
+    }
+
+    func geo(at location: BrowseLocation, _ filter: FilterState) -> [GeoSystem] {
+        geo(
+            lat: location.coordinate.latitude, lon: location.coordinate.longitude,
+            miles: location.radiusMi, filter)
+    }
+
+    func radiusChannels(system: String, lat: Double, lon: Double, miles: Double, _ filter: FilterState)
+        -> [CatalogChannel]
+    {
+        radiusChannels(systemID: system, lat: lat, lon: lon, miles: miles, filter)
     }
 }

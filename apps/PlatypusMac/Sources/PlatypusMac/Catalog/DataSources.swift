@@ -3,11 +3,11 @@
 import AppKit
 import SwiftUI
 
-// The multi-source browse model (shell). Platypus merges several data sources into one
-// browse/map view; each record carries provenance. Milestone: HPDB is the one real source;
-// RepeaterBook + RadioReference are stubs (toggle + credential capture) until their network
-// backends land. "Data source" (read/browse) is a separate axis from the "target radio"
-// (write) picked by the radio switcher.
+// The multi-source browse model. Platypus merges several data sources into one browse/map view;
+// each record carries provenance. A source is either local (a loaded card/folder) or networked
+// (credential + live fetch); a source whose backend hasn't landed yet is a toggle + credential shell.
+// "Data source" (read/browse) is a separate axis from the "target radio" (write) picked by the
+// radio switcher.
 
 /// A browsable data source kind.
 enum DataSourceKind: String, CaseIterable, Identifiable {
@@ -19,9 +19,9 @@ enum DataSourceKind: String, CaseIterable, Identifiable {
 
     var name: String {
         switch self {
-        case .hpdb: return "Sentinel HPDB"
-        case .repeaterBook: return "RepeaterBook"
-        case .radioReference: return "RadioReference"
+        case .hpdb: return "Uniden"
+        case .repeaterBook: return "Repeater Book"
+        case .radioReference: return "Radio Reference"
         }
     }
 
@@ -34,12 +34,12 @@ enum DataSourceKind: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Short provenance badge label.
+    /// Provenance label — spelled out (no abbreviations), matching how we refer to each source.
     var badge: String {
         switch self {
-        case .hpdb: return "HPDB"
-        case .repeaterBook: return "RB"
-        case .radioReference: return "RR"
+        case .hpdb: return "Uniden"
+        case .repeaterBook: return "Repeater Book"
+        case .radioReference: return "Radio Reference"
         }
     }
 
@@ -53,6 +53,16 @@ enum DataSourceKind: String, CaseIterable, Identifiable {
 
     /// External sources need a token/key before they can fetch.
     var needsCredential: Bool { self != .hpdb }
+
+    /// Whether this source is browsed by **querying a location** (fetch systems for a place) rather
+    /// than loading a static dataset. HPDB is static (a loaded card/folder); RadioReference and
+    /// RepeaterBook are location-queryable — they share the location-chip browse UI.
+    var isLocationQueryable: Bool {
+        switch self {
+        case .hpdb: return false
+        case .repeaterBook, .radioReference: return true
+        }
+    }
 
     /// Label for the missing-credential state ("needs token" / "needs key").
     var credentialNoun: String { self == .repeaterBook ? "token" : "key" }
@@ -110,17 +120,19 @@ enum DataSourceKind: String, CaseIterable, Identifiable {
         }
     }
 
-    /// The bundled logo image, if present in the app bundle.
+    /// The bundled logo image, if present. Loaded from the SwiftPM resource bundle (`Bundle.module`)
+    /// so it resolves under `swift run` and the packaged app alike.
     var logo: NSImage? {
         guard let name = logoName,
-              let url = Bundle.main.url(forResource: name, withExtension: "png")
+              let url = Bundle.module.url(forResource: name, withExtension: "png")
         else { return nil }
         return NSImage(contentsOf: url)
     }
 }
 
-/// One configured source: whether it's enabled and any captured credentials (shell only —
-/// not yet stored in Keychain or validated against the network).
+/// One configured source: whether it's enabled and any captured credentials. A networked source's
+/// login is validated live and stored in the Keychain; a not-yet-implemented source's config is held
+/// in-memory (shell) until its backend lands.
 struct DataSource: Identifiable {
     let kind: DataSourceKind
     /// Whether the user has added this source. Nothing is added by default: HPDB is added by
@@ -130,6 +142,8 @@ struct DataSource: Identifiable {
     var token: String?
     var email: String?
     var appKey: String?
+    /// RadioReference: the signed-in Premium username (the password lives in the Keychain).
+    var username: String?
     /// For HPDB: the picked folder of `s_*.hpd` files that feeds the map (its "credential").
     var folderPath: String?
 
@@ -140,7 +154,7 @@ struct DataSource: Identifiable {
         switch kind {
         case .hpdb: return folderPath != nil
         case .repeaterBook: return !(token ?? "").isEmpty
-        case .radioReference: return !(appKey ?? "").isEmpty
+        case .radioReference: return !(username ?? "").isEmpty
         }
     }
 
@@ -152,6 +166,10 @@ struct DataSource: Identifiable {
             let leaf = (folderPath as NSString).lastPathComponent
             let parent = ((folderPath as NSString).deletingLastPathComponent as NSString).lastPathComponent
             return parent.isEmpty ? leaf : "\(parent) · \(leaf)"
+        }
+        if kind == .radioReference {
+            guard let username, !username.isEmpty else { return "needs sign-in" }
+            return "signed in · \(username)"
         }
         if !configured { return "needs \(kind.credentialNoun)" }
         return "ready · stub"  // configured but no live fetch yet
@@ -170,6 +188,12 @@ final class DataSourceStore: ObservableObject {
             DataSource(kind: .repeaterBook, added: false, enabled: false),
             DataSource(kind: .radioReference, added: false, enabled: false),
         ]
+        // Restore a previously signed-in RadioReference login from the Keychain (username only —
+        // the password stays in the Keychain and is read at fetch time).
+        if let creds = RadioReferenceKeychain.load(), let i = index(.radioReference) {
+            sources[i].username = creds.username
+            sources[i].added = true
+        }
     }
 
     private func index(_ kind: DataSourceKind) -> Int? {
@@ -180,13 +204,20 @@ final class DataSourceStore: ObservableObject {
         index(kind).map { sources[$0] }
     }
 
-    /// Enable/disable a source (only meaningful once it's configured).
-    func toggle(_ kind: DataSourceKind) {
-        guard let i = index(kind) else { return }
+    /// Toggle a configured source on/off in the merge (multi-active — several sources can be on at
+    /// once; they merge into one location-first list + map). No-op if not configured.
+    func toggleEnabled(_ kind: DataSourceKind) {
+        guard let i = index(kind), sources[i].configured else { return }
         sources[i].enabled.toggle()
     }
 
-    /// Add (or re-point) the HPDB source to a picked folder of `s_*.hpd` files — added + on.
+    /// Enable a configured source (idempotent).
+    func setEnabled(_ kind: DataSourceKind, _ on: Bool) {
+        guard let i = index(kind), sources[i].configured else { return }
+        sources[i].enabled = on
+    }
+
+    /// Add (or re-point) the HPDB source to a picked folder of `s_*.hpd` files, and enable it.
     func addHpdb(folderPath: String) {
         guard let i = index(.hpdb) else { return }
         sources[i].folderPath = folderPath
@@ -194,13 +225,34 @@ final class DataSourceStore: ObservableObject {
         sources[i].enabled = true
     }
 
-    /// Enable/disable the HPDB map source without dropping its picked folder.
-    func setHpdb(enabled: Bool) {
+    /// Forget the HPDB source (e.g. the card was ejected and no map folder remains).
+    func signOutHpdb() {
         guard let i = index(.hpdb) else { return }
-        sources[i].enabled = enabled
+        sources[i].folderPath = nil
+        sources[i].added = false
+        sources[i].enabled = false
     }
 
-    /// Store captured credentials and mark the source added + enabled (shell — no validation yet).
+    /// Sign in to RadioReference: persist the login to the Keychain and enable the source.
+    /// Credentials are assumed already validated by the Add sheet.
+    func signInRadioReference(username: String, password: String) {
+        RadioReferenceKeychain.save(RadioReferenceCredentials(username: username, password: password))
+        guard let i = index(.radioReference) else { return }
+        sources[i].username = username
+        sources[i].added = true
+        sources[i].enabled = true
+    }
+
+    /// Sign out of RadioReference: clear the Keychain and forget the source.
+    func signOutRadioReference() {
+        RadioReferenceKeychain.clear()
+        guard let i = index(.radioReference) else { return }
+        sources[i].username = nil
+        sources[i].added = false
+        sources[i].enabled = false
+    }
+
+    /// Store captured RepeaterBook credentials (shell — no validation yet).
     func configure(_ kind: DataSourceKind, token: String? = nil, email: String? = nil,
                    appKey: String? = nil)
     {
@@ -214,9 +266,13 @@ final class DataSourceStore: ObservableObject {
         }
     }
 
-    /// Enabled + configured sources — the ones that actually merge into browse.
+    /// Enabled + configured sources — the merge set (may be several at once).
     var activeKinds: [DataSourceKind] { sources.filter { $0.enabled && $0.configured }.map(\.kind) }
     var activeCount: Int { activeKinds.count }
+    /// Whether a given kind is currently enabled + configured.
+    func isActive(_ kind: DataSourceKind) -> Bool {
+        source(kind).map { $0.enabled && $0.configured } ?? false
+    }
 
     /// The added sources, alphabetized by name — drives the dropdown list.
     var addedSources: [DataSource] {
@@ -233,23 +289,57 @@ final class DataSourceStore: ObservableObject {
     }
 }
 
-/// Captures the credentials an external source needs (shell — stored in the in-memory store,
-/// not yet Keychain, and not validated against the network).
+/// Captures the credentials an external source needs. A source with a live backend validates them
+/// against the network and stores the login in the Keychain; a shell source just holds its config
+/// in-memory until its backend lands.
 struct AddSourceSheet: View {
     let kind: DataSourceKind
-    /// (token, email, appKey) — only the fields relevant to `kind` are non-nil.
-    let onAdd: (String?, String?, String?) -> Void
+    /// The relevant fields for `kind` are non-nil: RepeaterBook → token/email; RadioReference →
+    /// username/password (validated live before this fires).
+    let onAdd: (_ token: String?, _ email: String?, _ appKey: String?, _ username: String?, _ password: String?) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var token = ""
     @State private var email = ""
     @State private var appKey = ""
+    @State private var username = ""
+    @State private var password = ""
+    @State private var validating = false
+    @State private var errorMessage: String?
 
     private var ready: Bool {
         switch kind {
         case .repeaterBook: return !token.trimmingCharacters(in: .whitespaces).isEmpty
-        case .radioReference: return !appKey.trimmingCharacters(in: .whitespaces).isEmpty
+        case .radioReference:
+            return RadioReferenceKey.isConfigured
+                && !username.trimmingCharacters(in: .whitespaces).isEmpty
+                && !password.isEmpty
         case .hpdb: return true
+        }
+    }
+
+    /// Validate RadioReference credentials off the main thread, then sign in on success.
+    private func addRadioReference() {
+        guard let appKey = RadioReferenceKey.current else {
+            errorMessage = "This build has no Radio Reference app key."
+            return
+        }
+        let user = username.trimmingCharacters(in: .whitespaces)
+        let pass = password
+        validating = true
+        errorMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = RadioReferenceSource.validate(appKey: appKey, username: user, password: pass)
+            DispatchQueue.main.async {
+                validating = false
+                switch result {
+                case .success:
+                    onAdd(nil, nil, nil, user, pass)
+                    dismiss()
+                case .failure(let err):
+                    errorMessage = err.message
+                }
+            }
         }
     }
 
@@ -293,7 +383,15 @@ struct AddSourceSheet: View {
                     Text("Both are sent as the required User-Agent on every request.")
                         .font(.system(size: 10)).foregroundStyle(Theme.fg3)
                 case .radioReference:
-                    field("App key", "your RadioReference app key", $appKey)
+                    field("Username", "your Radio Reference username", $username)
+                    secureField("Password", "your Radio Reference password", $password)
+                    if !RadioReferenceKey.isConfigured {
+                        Text("This build has no Radio Reference app key — set RR_APP_KEY (dev) or bundle it.")
+                            .font(.system(size: 10)).foregroundStyle(Color(hex: 0xff9f0a))
+                    } else {
+                        Text("Requires a Radio Reference Premium subscription.")
+                            .font(.system(size: 10)).foregroundStyle(Theme.fg3)
+                    }
                 case .hpdb:
                     Text("Open a card or backup folder from the Sources menu.")
                         .font(.system(size: 11)).foregroundStyle(Theme.fg3)
@@ -301,19 +399,34 @@ struct AddSourceSheet: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text("Stored locally for this session — Keychain + live validation land with the network backend.")
-                .font(.system(size: 9.5)).foregroundStyle(Theme.fg3)
-                .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 10.5)).foregroundStyle(Color(hex: 0xff453a))
+                    .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            } else if kind == .radioReference {
+                Text("Your login is stored in the macOS Keychain. Fetches run over TLS.")
+                    .font(.system(size: 9.5)).foregroundStyle(Theme.fg3)
+                    .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            } else {
+                Text("Stored locally for this session — Keychain + live validation land with the network backend.")
+                    .font(.system(size: 9.5)).foregroundStyle(Theme.fg3)
+                    .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            }
 
             HStack(spacing: 10) {
                 Spacer()
-                Button("Cancel") { dismiss() }.controlSize(.large)
-                Button("Add") {
-                    onAdd(token.isEmpty ? nil : token, email.isEmpty ? nil : email,
-                          appKey.isEmpty ? nil : appKey)
-                    dismiss()
+                Button("Cancel") { dismiss() }.controlSize(.large).disabled(validating)
+                Button(kind == .radioReference ? "Sign in" : "Add") {
+                    if kind == .radioReference {
+                        addRadioReference()
+                    } else {
+                        onAdd(token.isEmpty ? nil : token, email.isEmpty ? nil : email,
+                              appKey.isEmpty ? nil : appKey, nil, nil)
+                        dismiss()
+                    }
                 }
-                .buttonStyle(.borderedProminent).controlSize(.large).disabled(!ready)
+                .buttonStyle(.borderedProminent).controlSize(.large).disabled(!ready || validating)
+                if validating { ProgressView().controlSize(.small).padding(.leading, 2) }
                 Spacer()
             }
         }
@@ -343,6 +456,18 @@ struct AddSourceSheet: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Theme.fg3)
             TextField(placeholder, text: text)
+                .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.fg)
+                .padding(.horizontal, 9).padding(.vertical, 7)
+                .background(Theme.bg3).clipShape(RoundedRectangle(cornerRadius: Theme.rField))
+                .overlay(RoundedRectangle(cornerRadius: Theme.rField).stroke(Theme.border))
+        }
+    }
+
+    /// A themed labeled secure (password) field.
+    private func secureField(_ label: String, _ placeholder: String, _ text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Theme.fg3)
+            SecureField(placeholder, text: text)
                 .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.fg)
                 .padding(.horizontal, 9).padding(.vertical, 7)
                 .background(Theme.bg3).clipShape(RoundedRectangle(cornerRadius: Theme.rField))

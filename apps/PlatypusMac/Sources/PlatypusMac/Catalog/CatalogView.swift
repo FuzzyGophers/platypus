@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 The Platypus Authors
 import AppKit
+import CoreLocation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -59,53 +60,48 @@ struct WorkingList: Identifiable {
     let originalNumberTag: Int?
 }
 
-/// How the "Nationwide & Interstate" bucket (the `_MultipleStates` systems that
-/// don't belong to a single state) is split when drilled into.
-enum NationwideGroup: CaseIterable {
-    case us, canada, crossborder
-
-    var name: String {
-        switch self {
-        case .us: return "United States"
-        case .canada: return "Canada"
-        case .crossborder: return "Cross-border"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .us, .canada: return "flag"
-        case .crossborder: return "globe.americas"
-        }
-    }
-}
-
-/// Direction 1B — catalog-first, navigated as a **drill-down**: Country → State →
-/// County → System → Channel. Each level is small, so it's instant and every row is
-/// a full-width tap target (no hunting for a chevron). A live search collapses the
-/// hierarchy into a flat result list. Filtering runs in the Rust core.
+/// Direction — **location-first, multi-source**: set one location and every active source (HPDB,
+/// RadioReference, …) answers "what's here?", merged into one badged list + map. Drilling a system
+/// routes back to its source (trunked → local-first talkgroup categories, else channels). Filtering
+/// runs in the Rust core; the merge + provenance in `BrowseSources`.
 struct CatalogView: View {
     @State private var library: ScannerLibrary?
     @State private var stats: LibraryStats?
     @State private var filter = FilterState()
-    @State private var rows: [CatalogSystem] = []
     @State private var expanded: Set<String> = []
     @State private var channelCache: [String: [CatalogChannel]] = [:]
     @State private var status = "Open a card or backup folder — or add a data source — to browse systems by location."
     @State private var searchDebounce: DispatchWorkItem?
 
-    // Country → State → County masters (names) + the drill-down position.
+    /// The location-first browse aggregator: the merged system rows across every active source. The
+    /// middle column reads `browse.rows`; the Map lens fetches its pins on demand (so a big-county
+    /// search isn't blocked on per-system site fetches). A drill routes back to the owning source by
+    /// each row's `source` tag. Replaces the old single-source `library`/`rrSource` split.
+    @StateObject private var browse = BrowseSources()
+    /// The browse radius (mi) for the current location — HPDB scopes its data to it; also the map ring.
+    @State private var browseRadius: Double = 25
+    /// A location resolve (geocode / device fix) is in flight (drives the chip spinner).
+    @State private var geocoding = false
+    /// The location-bar ZIP/place field text.
+    @State private var locationQuery = ""
+    /// The geographic county picker popover (a source's geo hierarchy → set the location).
+    @State private var showCountyPicker = false
+    /// The state selected inside the county picker (nil = pick a state first).
+    @State private var pickerState: UInt64?
+    /// Bumped as background map-pin warming places each system's real site, so the Map lens reloads
+    /// and pins spread progressively (folded into the map's `reloadToken`).
+    @State private var mapPinToken = 0
+    /// Generation guard for the background warm loop — a new location/lens change supersedes it.
+    @State private var warmGen = 0
+    /// The last browse/location error, shown in the location bar.
+    @State private var browseError: String?
+
+    // Country → State → County masters (names) — kept for the geographic county picker.
     @State private var stateNames: [UInt64: String] = [:]
     @State private var stateAbbr: [UInt64: String] = [:]
     @State private var stateToCountry: [UInt64: UInt64] = [:]
     @State private var countyNames: [UInt64: String] = [:]
     @State private var countyToState: [UInt64: UInt64] = [:]
-    @State private var selectedCountry: UInt64?
-    @State private var selectedState: UInt64?
-    @State private var selectedCounty: UInt64?
-    /// Within the "Nationwide & Interstate" bucket (country id 0): the chosen
-    /// country split (US / Canada / Cross-border).
-    @State private var selectedNationwideGroup: NationwideGroup?
 
     @State private var libraryDir: String?
     /// A dedicated map data source (an added HPDB folder), independent of the editor `library`
@@ -171,11 +167,20 @@ struct CatalogView: View {
     @State private var showingFt60Write = false
     /// SDS150 display-customization editor (gear popup).
     @State private var showDisplayEditor = false
-    /// Browse data sources (merge model). HPDB real; RepeaterBook/RR stubs until their
-    /// network backends land. Separate axis from the target radio.
+    /// Browse data sources (merge model) — a separate axis from the target radio (write).
     @StateObject private var dataSources = DataSourceStore()
     /// The source kind whose Add/config sheet is open, if any.
     @State private var addingSource: DataSourceKind?
+    /// Composite ids (`<source>:<id>`) whose channel drill is fetching (network sources are async).
+    @State private var rrChannelsInFlight: Set<String> = []
+    /// A trunked system's talkgroup categories (by composite id), for the location-first drill.
+    @State private var rrCategories: [String: [BrowseCategory]] = [:]
+    /// Expanded talkgroup categories, keyed `"<compositeID>|<categoryId>"`.
+    @State private var expandedCats: Set<String> = []
+    /// Trunked systems (composite ids) where the user chose "show all areas".
+    @State private var rrShowAllCats: Set<String> = []
+    /// One-shot device-location helper for the "Near me" search.
+    @StateObject private var rrLocator = LocationFinder()
     /// Whether the per-list settings popover (Monitor / Quick Key / Number Tag) is open.
     @State private var showListSettings = false
     @State private var selectedSummary: FavoritesSummary?
@@ -202,12 +207,64 @@ struct CatalogView: View {
 
     /// The active radio's device class (nil = neutral, no radio chosen).
     private var activeClass: RadioClass? { radios.active?.deviceClass }
-    /// The library the map reads from: an enabled HPDB source if one's added, else the editor
-    /// library (so opening an SD card still shows on the map). Independent of the target radio.
-    private var mapSourceLibrary: ScannerLibrary? {
-        if dataSources.source(.hpdb)?.enabled == true, let mapLibrary { return mapLibrary }
-        return library
+    /// The HPDB browse handle: an added map folder if present, else the loaded editor library (so
+    /// opening an SD card still browses/maps). Registered with the aggregator as the `.hpdb` source.
+    private var mapSourceLibrary: ScannerLibrary? { mapLibrary ?? library }
+
+    /// The browse rows to display, dropping trunked systems for a conventional-only radio (a clone HT
+    /// can't program them). Merged across every active source by the aggregator.
+    private var displayRows: [CatalogSystem] {
+        conventionalOnly ? browse.rows.filter { !$0.isTrunk } : browse.rows
     }
+
+    /// The geo + pin-channel providers for the Map lens, merged across every active source. `nil`
+    /// when no source is active (nothing to plot). Pin ids are namespaced `<source>:<id>` so the
+    /// map's id-only callbacks route back to the owning source.
+    private var mapProviders:
+        (
+            geo: (Double, Double, Double, FilterState) -> [GeoSystem],
+            radius: (String, Double, Double, Double, FilterState) -> [CatalogChannel]
+        )?
+    {
+        guard browse.activeCount > 0 else { return nil }
+        let agg = browse
+        let zip = browse.location?.zip
+        return (
+            geo: { lat, lon, mi, f in
+                let loc = BrowseLocation(
+                    label: "", coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                    radiusMi: mi, zip: zip)
+                return agg.active.flatMap { s -> [GeoSystem] in
+                    let kind = s.sourceKind
+                    return s.geo(at: loc, f).map { p in
+                        GeoSystem(
+                            id: "\(kind.rawValue):\(p.id)", name: p.name, kind: p.kind, tech: p.tech,
+                            serviceType: p.serviceType, lat: p.lat, lon: p.lon, rangeMi: p.rangeMi,
+                            source: kind)
+                    }
+                }
+            },
+            radius: { nsId, lat, lon, mi, f in
+                guard let (kind, localId) = Self.splitNamespace(nsId) else { return [] }
+                return agg.channelsForPin(localId, source: kind, lat: lat, lon: lon, miles: mi, f)
+            }
+        )
+    }
+
+    /// Split a namespaced pin id (`<source>:<localId>`) back into its source kind + local id.
+    static func splitNamespace(_ ns: String) -> (DataSourceKind, String)? {
+        guard let sep = ns.firstIndex(of: ":") else { return nil }
+        let raw = String(ns[ns.startIndex..<sep])
+        guard let kind = DataSourceKind(rawValue: raw) else { return nil }
+        return (kind, String(ns[ns.index(after: sep)...]))
+    }
+
+    /// The map's initial center — the current browse location, so the Map lens opens on what you
+    /// searched instead of the nationwide default.
+    private var rrMapCenter: CLLocationCoordinate2D? {
+        browse.location.map { $0.coordinate }
+    }
+
     /// A clone-image (memory) radio is active — the flat editor + conventional-only browse.
     private var cloneActive: Bool { activeClass == .cloneImage }
     /// Browse is limited to conventional systems for the active radio's class.
@@ -298,17 +355,23 @@ struct CatalogView: View {
                 Divider().overlay(Theme.border)
                 Group {
                     if lens == .map {
-                        if mapSourceLibrary == nil {
-                            mapEmptyState
-                        } else {
-                            MapLensView(library: mapSourceLibrary, filter: filter, canAdd: canAdd,
+                        if let providers = mapProviders {
+                            MapLensView(geo: providers.geo, radiusChannels: providers.radius,
+                                        filter: filter,
+                                        canAdd: canAdd && browse.capabilities.contains(.addToRadio),
                                         conventionalOnly: conventionalOnly,
-                                        listName: cloneActive ? radios.active?.name : selectedList?.name) { id, lat, lon, miles in
+                                        listName: cloneActive ? radios.active?.name : selectedList?.name,
+                                        initialCenter: rrMapCenter,
+                                        onLocationSearch: { coord in setLocation(coord: coord) },
+                                        reloadToken: "\(browse.activeKinds.map(\.rawValue).joined(separator: ","))|\(mapPinToken)",
+                                        addAllowed: { canAddFrom($0.source) }) { id, lat, lon, miles in
                                 addSystemRadiusToSelected(id, lat: lat, lon: lon, miles: miles)
                             }
+                        } else {
+                            mapEmptyState
                         }
                     } else {
-                        catalog
+                        browseColumn
                     }
                 }
                 .frame(minWidth: 380, maxWidth: .infinity)
@@ -360,8 +423,17 @@ struct CatalogView: View {
             }
         }
         .sheet(item: $addingSource) { kind in
-            AddSourceSheet(kind: kind) { token, email, appKey in
-                dataSources.configure(kind, token: token, email: email, appKey: appKey)
+            AddSourceSheet(kind: kind) { token, email, appKey, username, password in
+                if kind == .radioReference, let username, let password {
+                    // Sign in and add RadioReference to the merge — it now answers the shared location
+                    // alongside every other active source.
+                    dataSources.signInRadioReference(username: username, password: password)
+                    browseError = nil
+                } else {
+                    dataSources.configure(kind, token: token, email: email, appKey: appKey)
+                }
+                syncAggregator()
+                refresh()
             }
         }
         .sheet(isPresented: $showingFt60Read) {
@@ -374,9 +446,16 @@ struct CatalogView: View {
             ManageRadiosSheet(radios: radios)
         }
         .onChange(of: radios.activeID) { syncActiveRadio() }
+        // Progressively warm the map's real pin positions when the Map lens is shown / the location
+        // changes (instant pins first, then refine in the background). No-op off the map or with no
+        // location; a fresh call supersedes any in-flight warm via `warmGen`.
+        .onChange(of: lens) { if lens == .map { startMapWarm() } }
+        .onChange(of: browse.location) { if lens == .map { startMapWarm() } }
         .onAppear {
             // Reconcile the clone-image data with the restored active radio (if any).
             syncActiveRadio()
+            // Register any Keychain-restored source (RadioReference) with the browse aggregator.
+            syncAggregator()
             // No card is auto-detected/opened on launch — the user opens and reads on demand from
             // the editor's action bar (Read / Open Backup). `PLATYPUS_LIBRARY` stays as an explicit
             // env override for dev/testing.
@@ -665,7 +744,7 @@ struct CatalogView: View {
             }
             if dataSources.source(.hpdb)?.added == true {
                 Divider()
-                Button("Change HPDB folder…") { openMapSource() }
+                Button("Change Uniden folder…") { openMapSource() }
             }
             if !dataSources.addableKinds.isEmpty {
                 Divider()
@@ -692,25 +771,39 @@ struct CatalogView: View {
         VStack(spacing: 12) {
             Image(systemName: "map").font(.system(size: 34)).foregroundStyle(Theme.fg3)
             Text("No map source").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.fg)
-            Text("Open a Sentinel HPDB folder to plot systems by location.")
+            Text("Open a Uniden folder to plot systems by location.")
                 .font(.system(size: 11)).foregroundStyle(Theme.fg3)
                 .multilineTextAlignment(.center)
             Button { openMapSource() } label: {
-                Label("Open an HPDB folder", systemImage: "folder")
+                Label("Open a Uniden folder", systemImage: "folder")
             }.controlSize(.large)
         }
         .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bg)
     }
 
-    /// Toggle a source on/off. HPDB drives the map handle (falls back to the editor library when
-    /// off); the external stubs just flip their enabled flag.
+    /// Toggle a source on/off in the merge (multi-active). The aggregator re-queries the shared
+    /// location across whatever's now enabled.
     private func toggleSource(_ kind: DataSourceKind) {
-        if kind == .hpdb {
-            let on = dataSources.source(.hpdb)?.enabled ?? false
-            dataSources.setHpdb(enabled: !on)
+        dataSources.toggleEnabled(kind)
+        syncAggregator()
+        refresh()
+    }
+
+    /// Mirror the data-source store into the aggregator: register each configured source's live
+    /// `BrowseSource` instance (HPDB's library, the RR wrapper) and its enabled state. Called after
+    /// any source add / toggle / load, and on appear.
+    private func syncAggregator() {
+        browse.register(mapSourceLibrary, for: .hpdb)
+        if dataSources.source(.radioReference)?.added == true {
+            if !browse.isRegistered(.radioReference) {
+                browse.register(RadioReferenceBrowseSource(), for: .radioReference)
+            }
         } else {
-            dataSources.toggle(kind)
+            browse.register(nil, for: .radioReference)
+        }
+        for kind in DataSourceKind.allCases {
+            browse.setEnabled(kind, dataSources.isActive(kind))
         }
     }
 
@@ -732,7 +825,7 @@ struct CatalogView: View {
             Picker("", selection: $lens) {
                 ForEach(Lens.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
-            .pickerStyle(.segmented).fixedSize().disabled(mapSourceLibrary == nil)
+            .pickerStyle(.segmented).fixedSize().disabled(mapProviders == nil)
             Spacer()
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.fg3)
@@ -861,217 +954,332 @@ struct CatalogView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Catalog (drill-down)
+    // MARK: - Location-first browse (all sources merged)
 
-    private var catalog: some View {
+    /// The middle column: a location bar on top, then the merged systems (from every active source)
+    /// as one location-first list. One code path for HPDB, RadioReference, and any future source.
+    private var browseColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            breadcrumb
+            browseLocationBar
             Divider().overlay(Theme.border)
-            if rows.isEmpty {
-                emptyCatalog
-            } else if searching {
-                systemList(systemsMatching, county: nil)
-            } else if selectedCountry == 0 {
-                // "Nationwide & Interstate" bucket: split by country, then systems.
-                // Channels load in full (county: nil) on expand.
-                if let g = selectedNationwideGroup {
-                    systemList(nationwideSystems(in: g), county: nil)
-                } else {
-                    nationwideGroupList
-                }
-            } else if let county = selectedCounty {
-                // county == 0 is the "Statewide" entry (no-county channels).
-                let list = county == 0 ? statewideSystems(selectedState ?? 0) : systems(inCounty: county)
-                systemList(list, county: county)
-            } else if let state = selectedState {
-                // Some states (notably the `_MultipleStates` pseudo-state that holds
-                // nationwide systems) have no county breakdown — their channels are
-                // geo-placed into real counties. List the systems directly so the
-                // node isn't a dead end; expanding shows each system's full channels.
-                if countiesLevel(state).isEmpty && statewideSystems(state).isEmpty {
-                    systemList(systemsInState(state), county: nil)
-                } else {
-                    countyList(state)
-                }
-            } else if let country = selectedCountry {
-                stateList(country)
+            if browse.activeCount == 0 {
+                noSourcesState
+            } else if browse.location == nil {
+                chooseLocationState
+            } else if displayRows.isEmpty {
+                if browse.loading { loadingBrowse } else { emptyBrowse }
             } else {
-                countryList
+                mergedList
             }
         }
     }
 
-    private var breadcrumb: some View {
-        HStack(spacing: 6) {
-            crumb("All", active: selectedCountry == nil && !searching) {
-                selectedCountry = nil; selectedState = nil; selectedCounty = nil
-                selectedNationwideGroup = nil
+    /// The location bar: the current place + radius + source chips, with a ZIP/place field and a
+    /// "near me" button. Setting it re-queries every active source.
+    private var browseLocationBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "mappin.and.ellipse").font(.system(size: 12)).foregroundStyle(Theme.accent)
+                if let loc = browse.location {
+                    Text(loc.label).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                } else {
+                    Text("Set a location").font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.fg2)
+                }
+                if browse.loading || geocoding { ProgressView().controlSize(.small).scaleEffect(0.7) }
+                Spacer()
+                // Freshness: "as of <date>" + a Refresh control for cache-backed sources (Radio
+                // Reference). Local sources (Uniden) report no fetch time, so this stays hidden.
+                if browse.hasRefreshable, browse.location != nil {
+                    if let asOf = browse.lastFetched {
+                        Text("as of \(asOfText(asOf))").font(.system(size: 10)).foregroundStyle(Theme.fg3)
+                            .help("RadioReference data last fetched \(asOf.formatted())")
+                    }
+                    Button { refreshBrowseCaches() } label: {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain).disabled(geocoding).help("Refresh from the source")
+                }
+                ForEach(browse.activeKinds) { sourceBadge($0) }
             }
-            if searching {
-                crumbChevron; Text("Search “\(filter.search)”").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.fg)
-            } else if selectedCountry == 0 {
-                // Nationwide & Interstate bucket: bucket crumb, then the country split.
-                crumbChevron
-                crumb(Country.name(0), active: selectedNationwideGroup == nil) {
-                    selectedNationwideGroup = nil
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 10)).foregroundStyle(Theme.fg3)
+                TextField("ZIP or place", text: $locationQuery)
+                    .textFieldStyle(.plain).font(.system(size: 12))
+                    .onSubmit { setLocation(query: locationQuery) }
+                Button { setLocationNearMe() } label: {
+                    Image(systemName: "location.fill").font(.system(size: 10)).foregroundStyle(Theme.accent)
+                }.buttonStyle(.plain).help("Near me")
+                // Geographic browse-to-county, when an active source offers a geo hierarchy (HPDB).
+                if browse.capabilities.contains(.geoHierarchy) && !stateNames.isEmpty {
+                    Button { pickerState = nil; showCountyPicker = true } label: {
+                        Image(systemName: "list.bullet.indent").font(.system(size: 10)).foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain).help("Browse to a county")
+                    .popover(isPresented: $showCountyPicker, arrowEdge: .bottom) { countyPicker }
                 }
-                if let g = selectedNationwideGroup {
-                    crumbChevron
-                    Text(g.name).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.fg)
-                }
-            } else {
-                if let country = selectedCountry {
-                    crumbChevron
-                    crumb(Country.name(country), active: selectedState == nil) { selectedState = nil; selectedCounty = nil }
-                }
-                if let s = selectedState {
-                    crumbChevron
-                    crumb(stateNames[s] ?? "State \(s)", active: selectedCounty == nil) { selectedCounty = nil }
-                }
-                if let c = selectedCounty {
-                    crumbChevron
-                    Text(c == 0 ? "Statewide" : (countyNames[c] ?? "County \(c)"))
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.fg)
-                }
+                Menu {
+                    ForEach([15, 25, 40, 60, 80], id: \.self) { r in
+                        Button("\(r) mi") { setRadius(Double(r)) }
+                    }
+                } label: {
+                    Text("\(Int(browseRadius)) mi").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.fg2)
+                }.menuStyle(.borderlessButton).fixedSize()
             }
-            Spacer()
-            if canAdd {
-                Button("Add all to \(addTargetName)", action: addAllInView)
-                    .buttonStyle(.plain).font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.accent).disabled(rows.isEmpty)
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 9).background(Theme.bg2)
-    }
-
-    private func crumb(_ text: String, active: Bool, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text).font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(active ? Theme.fg : Theme.accent)
-        }.buttonStyle(.plain)
-    }
-
-    private var crumbChevron: some View {
-        Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(Theme.fg3)
-    }
-
-    private var emptyCatalog: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "tray").font(.system(size: 26)).foregroundStyle(Theme.fg3)
-            Text(status).font(.system(size: 12)).foregroundStyle(Theme.fg3)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // Level 0 — countries.
-    private var countryList: some View {
-        List(countriesLevel, id: \.id) { c in
-            drillRow(icon: "globe.americas.fill", title: c.name, trailing: nil, count: c.count) {
-                selectedCountry = c.id
+            .padding(.horizontal, 9).padding(.vertical, 6)
+            .background(Theme.bg3).clipShape(RoundedRectangle(cornerRadius: Theme.rField))
+            .overlay(RoundedRectangle(cornerRadius: Theme.rField).stroke(Theme.border))
+            if let browseError {
+                Text(browseError).font(.system(size: 10.5)).foregroundStyle(Theme.warn).lineLimit(2)
             }
         }
-        .listStyle(.plain).scrollContentBackground(.hidden).background(Theme.bg)
+        .padding(.horizontal, 14).padding(.vertical, 10).background(Theme.bg2)
     }
 
-    // Level 1 — states/provinces in a country.
-    private func stateList(_ country: UInt64) -> some View {
-        List(statesLevel(country), id: \.id) { s in
-            drillRow(icon: "map", title: s.name, trailing: s.abbr, count: s.count) {
-                selectedState = s.id
+    /// Browse-to-county picker (a source's geo hierarchy): pick a state, then a county; the county's
+    /// place is geocoded and becomes the browse location. Fed by the HPDB masters.
+    private var countyPicker: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                if pickerState != nil {
+                    Button { pickerState = nil } label: {
+                        Image(systemName: "chevron.left").font(.system(size: 10, weight: .bold))
+                    }.buttonStyle(.plain)
+                }
+                Text(pickerState.flatMap { stateNames[$0] } ?? "Choose a state")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
             }
-        }
-        .listStyle(.plain).scrollContentBackground(.hidden).background(Theme.bg)
-    }
-
-    // The "Nationwide & Interstate" bucket split by country (US / Canada / Cross-border).
-    private var nationwideGroupList: some View {
-        let byGroup = Dictionary(grouping: systemsInState(0), by: nationwideGroup(of:))
-        return List {
-            ForEach(NationwideGroup.allCases, id: \.self) { g in
-                if let items = byGroup[g], !items.isEmpty {
-                    drillRow(icon: g.icon, title: g.name, trailing: nil, count: items.count) {
-                        selectedNationwideGroup = g
+            .padding(10)
+            Divider().overlay(Theme.border)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let state = pickerState {
+                        ForEach(pickerCounties(state), id: \.id) { c in
+                            pickerRow(c.name) { selectCounty(c.id, state: state) }
+                        }
+                    } else {
+                        ForEach(pickerStates, id: \.id) { s in
+                            pickerRow(s.name, trailing: s.abbr) { pickerState = s.id }
+                        }
                     }
                 }
             }
+            .frame(width: 240, height: 300)
         }
-        .listStyle(.plain).scrollContentBackground(.hidden).background(Theme.bg)
     }
 
-    // Level 2 — counties in a state (plus a "Statewide" entry for no-county systems).
-    private func countyList(_ state: UInt64) -> some View {
-        let statewide = statewideSystems(state)
-        return List {
-            if !statewide.isEmpty {
-                drillRow(icon: "flag.fill", title: "Statewide", trailing: nil, count: statewide.count) {
-                    selectedCounty = 0
-                }
-            }
-            ForEach(countiesLevel(state), id: \.id) { c in
-                drillRow(icon: "mappin.and.ellipse", title: c.name, trailing: nil, count: c.count) {
-                    selectedCounty = c.id
-                }
-            }
-        }
-        .listStyle(.plain).scrollContentBackground(.hidden).background(Theme.bg)
-    }
-
-    // Level 3/4 — systems (+ inline channels), channels scoped to `county` (nil = all).
-    private func systemList(_ systems: [CatalogSystem], county: UInt64?) -> some View {
-        List {
-            ForEach(systems) { sys in
-                systemRow(sys, county: county)
-                if expanded.contains(sys.id) {
-                    ForEach(channelCache[cacheKey(sys, county)] ?? []) { ch in channelRow(ch, sys) }
-                }
-            }
-        }
-        .listStyle(.plain).scrollContentBackground(.hidden).background(Theme.bg)
-    }
-
-    /// A full-width navigation row (state / county). The whole row is tappable.
-    private func drillRow(icon: String, title: String, trailing: String?, count: Int, _ action: @escaping () -> Void) -> some View {
+    private func pickerRow(_ title: String, trailing: String? = nil, _ action: @escaping () -> Void)
+        -> some View
+    {
         Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon).font(.system(size: 14)).foregroundStyle(Theme.fg2).frame(width: 18)
-                Text(title).font(.system(size: 13, weight: .medium))
+            HStack(spacing: 8) {
+                Text(title).font(.system(size: 12)).foregroundStyle(Theme.fg).lineLimit(1)
                 if let trailing, !trailing.isEmpty {
                     Text(trailing).font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.fg3)
                 }
                 Spacer()
-                Text("\(count)").font(.system(size: 11)).foregroundStyle(Theme.fg3)
-                Image(systemName: "chevron.right").font(.system(size: 10)).foregroundStyle(Theme.fg3)
+                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(Theme.fg3)
             }
-            .padding(.vertical, 8).contentShape(Rectangle())
+            .padding(.horizontal, 10).padding(.vertical, 7).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
+    /// States present in the masters, alphabetical.
+    private var pickerStates: [(id: UInt64, name: String, abbr: String)] {
+        stateNames.map { (id: $0.key, name: $0.value, abbr: stateAbbr[$0.key] ?? "") }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Counties within a state, alphabetical.
+    private func pickerCounties(_ state: UInt64) -> [(id: UInt64, name: String)] {
+        countyNames.filter { countyToState[$0.key] == state }
+            .map { (id: $0.key, name: $0.value) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Resolve a picked county to a browse location (geocode "<County>, <State>") and query there.
+    private func selectCounty(_ county: UInt64, state: UInt64) {
+        showCountyPicker = false
+        let countyName = countyNames[county] ?? "County"
+        let stateName = stateNames[state] ?? ""
+        setLocation(query: "\(countyName), \(stateName)")
+    }
+
+    private var noSourcesState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "square.stack.3d.up.slash").font(.system(size: 30)).foregroundStyle(Theme.fg3)
+            Text("No data source").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.fg)
+            Text(status).font(.system(size: 11)).foregroundStyle(Theme.fg3).multilineTextAlignment(.center)
         }
-        .buttonStyle(.plain)
+        .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.bg)
+    }
+
+    private var chooseLocationState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "mappin.and.ellipse").font(.system(size: 34)).foregroundStyle(Theme.fg3)
+            Text("Choose a location").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.fg)
+            Text("Set a location above to see nearby systems from your active sources.")
+                .font(.system(size: 11)).foregroundStyle(Theme.fg3).multilineTextAlignment(.center)
+        }
+        .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.bg)
+    }
+
+    private var emptyBrowse: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "tray").font(.system(size: 26)).foregroundStyle(Theme.fg3)
+            Text("No systems here — try a wider radius or a different location.")
+                .font(.system(size: 12)).foregroundStyle(Theme.fg3).multilineTextAlignment(.center)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(.horizontal, 24)
+    }
+
+    private var loadingBrowse: some View {
+        VStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("Fetching nearby systems…").font(.system(size: 12)).foregroundStyle(Theme.fg3)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The merged system list — every active source's systems for the current location, each row
+    /// badged by source. Expanding drills (trunked → categories, else channels) via the aggregator.
+    private var mergedList: some View {
+        List {
+            ForEach(displayRows, id: \.compositeID) { sys in
+                systemRow(sys)
+                if expanded.contains(sys.compositeID) {
+                    drillRows(sys)
+                }
+            }
+        }
+        .listStyle(.plain).scrollContentBackground(.hidden).background(Theme.bg)
+    }
+
+    /// A system's drill: its talkgroup categories (trunked, local-first) or its channels directly.
+    @ViewBuilder
+    private func drillRows(_ sys: CatalogSystem) -> some View {
+        let ck = sys.compositeID
+        if let cats = rrCategories[ck] {
+            ForEach(cats) { cat in
+                rrCategoryRow(sys, cat)
+                if expandedCats.contains("\(ck)|\(cat.id)") {
+                    rrChannelRows(key: "\(ck)|\(cat.id)", sys: sys)
+                }
+            }
+            if !rrShowAllCats.contains(ck) { showAllAreasRow(sys) }
+        } else if channelCache[ck] != nil {
+            rrChannelRows(key: ck, sys: sys)
+        } else if rrChannelsInFlight.contains(ck) {
+            loadingRow("Loading…")
+        }
+    }
+
+    /// A small indented informational sub-row under a system (e.g. "no channels").
+    private func infoRow(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Spacer().frame(width: 30)
+            Text(text).font(.system(size: 11)).foregroundStyle(Theme.fg3)
+            Spacer()
+        }
+        .padding(.vertical, 4)
         .listRowBackground(Theme.bg)
     }
 
-    private func systemRow(_ sys: CatalogSystem, county: UInt64?) -> some View {
+    /// Channel rows for a cache `key` ("<compositeID>" direct / "<compositeID>|<catId>" category),
+    /// with loading + empty states.
+    @ViewBuilder
+    private func rrChannelRows(key: String, sys: CatalogSystem) -> some View {
+        if let chans = channelCache[key] {
+            if chans.isEmpty {
+                infoRow("No channels listed.")
+            } else {
+                ForEach(chans) { ch in channelRow(ch, sys) }
+            }
+        } else if rrChannelsInFlight.contains(key) {
+            loadingRow("Loading channels…")
+        }
+    }
+
+    private func rrCategoryRow(_ sys: CatalogSystem, _ cat: BrowseCategory) -> some View {
+        Button { toggleCategory(sys, cat.id) } label: {
+            HStack(spacing: 8) {
+                Spacer().frame(width: 22)
+                Image(systemName: expandedCats.contains("\(sys.compositeID)|\(cat.id)") ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9)).foregroundStyle(Theme.fg3).frame(width: 10)
+                Image(systemName: cat.local ? "mappin.circle" : "square.stack.3d.up")
+                    .font(.system(size: 12)).foregroundStyle(cat.local ? Theme.accent : Theme.fg2)
+                Text(cat.name).font(.system(size: 12)).lineLimit(1)
+                Spacer()
+                if cat.local { badge("LOCAL") } else if cat.systemwide { badge("SHARED") }
+                if let d = cat.distanceMi {
+                    Text("\(Int(d.rounded())) mi").font(.system(size: 9.5)).foregroundStyle(Theme.fg3)
+                }
+            }
+            .padding(.vertical, 4).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).listRowBackground(Theme.bg)
+    }
+
+    private func showAllAreasRow(_ sys: CatalogSystem) -> some View {
+        Button { showAllAreas(sys) } label: {
+            HStack(spacing: 8) {
+                Spacer().frame(width: 32)
+                Image(systemName: "plus.magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.accent)
+                Text("Show all areas").font(.system(size: 11)).foregroundStyle(Theme.accent)
+                Spacer()
+            }
+            .padding(.vertical, 4).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).listRowBackground(Theme.bg)
+    }
+
+    /// A small indented loading sub-row (spinner + label).
+    private func loadingRow(_ text: String) -> some View {
         HStack(spacing: 8) {
-            // "+" adds the system's channels to the open list (when one is open).
-            Button { addSystemToSelected(sys, county: county) } label: {
+            Spacer().frame(width: 30)
+            ProgressView().controlSize(.small)
+            Text(text).font(.system(size: 11)).foregroundStyle(Theme.fg3)
+            Spacer()
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(Theme.bg)
+    }
+
+    /// Whether channels from a given source can be added to the active target — gated on the source
+    /// supporting `.addToRadio` (HPDB today; RadioReference/RepeaterBook card-write lands later).
+    private func canAddFrom(_ kind: DataSourceKind) -> Bool {
+        browse.capabilities(of: kind).contains(.addToRadio)
+    }
+
+    /// The grey sub-line under a system name: the best detail the source gave — home city, else the
+    /// site count (trunked) / "conventional". Degrades consistently per source.
+    private func systemSubtitle(_ sys: CatalogSystem) -> String {
+        if let city = sys.city, !city.isEmpty { return city }
+        if sys.isTrunk { return sys.siteCount > 0 ? "\(sys.siteCount) site\(sys.siteCount == 1 ? "" : "s")" : "trunked" }
+        return "conventional"
+    }
+
+    private func systemRow(_ sys: CatalogSystem) -> some View {
+        HStack(spacing: 8) {
+            // "+" adds the system's channels to the open list (when one is open + the source can add).
+            Button { addSystemToSelected(sys) } label: {
                 Image(systemName: "plus.circle").font(.system(size: 14)).foregroundStyle(Theme.accent)
             }
-            .buttonStyle(.plain).disabled(!canAdd)
+            .buttonStyle(.plain).disabled(!canAdd || !canAddFrom(sys.source))
             .help(cloneActive ? "Add this system's channels to the \(addTargetName)" : "Add this system's channels to the open list")
-            Button { toggleExpand(sys, county: county) } label: {
+            Button { toggleExpand(sys) } label: {
                 HStack(spacing: 8) {
                     Image(systemName: sys.isTrunk ? "antenna.radiowaves.left.and.right" : "radio")
                         .font(.system(size: 13)).foregroundStyle(Theme.fg2).frame(width: 16)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(sys.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                        Text(sys.isTrunk ? "\(sys.siteCount) site\(sys.siteCount == 1 ? "" : "s")" : "conventional")
+                        Text(systemSubtitle(sys))
                             .font(.system(size: 10.5)).foregroundStyle(Theme.fg3)
                     }
                     Spacer()
-                    // Flag systems whose coverage spans many counties so it's clear
-                    // they aren't county-exclusive (e.g. a statewide P25 network).
-                    if county != nil && sys.multiCounty {
-                        badge("WIDE")
-                    }
+                    // Provenance badge only when several sources are merged — otherwise it's noise.
+                    if browse.activeCount > 1 { sourceBadge(sys.source) }
                     if let tech = sys.tech { badge(tech) }
-                    Image(systemName: expanded.contains(sys.id) ? "chevron.down" : "chevron.right")
+                    Image(systemName: expanded.contains(sys.compositeID) ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10)).foregroundStyle(Theme.fg3).frame(width: 12)
                 }
                 .contentShape(Rectangle())
@@ -1089,7 +1297,7 @@ struct CatalogView: View {
             Button { addChannels([ch]) } label: {
                 Image(systemName: "plus.circle").font(.system(size: 12)).foregroundStyle(Theme.accent)
             }
-            .buttonStyle(.plain).disabled(!canAdd)
+            .buttonStyle(.plain).disabled(!canAdd || !canAddFrom(sys.source))
             .help(cloneActive ? "Add this channel to the \(addTargetName)" : "Add this channel to the open list")
             Image(systemName: info.symbol).font(.system(size: 12)).foregroundStyle(info.color)
                 .frame(width: 14).padding(.top, 1)
@@ -1252,7 +1460,7 @@ struct CatalogView: View {
         panel.canChooseDirectories = true
         panel.directoryURL = BackupStore.modelRoot(model)
         panel.prompt = "Open"
-        panel.message = "Choose a card backup or HPDB folder."
+        panel.message = "Choose a card backup or Uniden folder."
         return panel.runModal() == .OK ? panel.url : nil
     }
 
@@ -1285,7 +1493,9 @@ struct CatalogView: View {
                 self.mapLibrary = lib
                 self.mapDir = hpdb
                 self.dataSources.addHpdb(folderPath: hpdb)
-                self.lens = .map
+                self.syncAggregator()
+                self.refresh()
+                // Stay on whatever lens the user is on — adding a source shouldn't yank them to the map.
             }
         }
     }
@@ -1879,98 +2089,6 @@ struct CatalogView: View {
             .clipShape(RoundedRectangle(cornerRadius: Theme.rChip))
     }
 
-    // MARK: - Hierarchy derivation (from the filtered rows + masters)
-    //
-    // A system carries its AreaState ids (`states`) and its *covered* counties
-    // (`counties`, location-first), so it can appear under several states/counties.
-
-    private func countries(_ sys: CatalogSystem) -> Set<UInt64> {
-        Set(sys.states.compactMap { stateToCountry[$0] })
-    }
-
-    private var countriesLevel: [(id: UInt64, name: String, count: Int)] {
-        var counts: [UInt64: Int] = [:]
-        for sys in rows { for c in countries(sys) { counts[c, default: 0] += 1 } }
-        return counts.map { (id: $0.key, name: Country.name($0.key), count: $0.value) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private func statesLevel(_ country: UInt64) -> [(id: UInt64, name: String, abbr: String, count: Int)] {
-        var counts: [UInt64: Int] = [:]
-        for sys in rows {
-            for s in sys.states where stateToCountry[s] == country { counts[s, default: 0] += 1 }
-        }
-        return counts.map { (id: $0.key, name: stateNames[$0.key] ?? "State \($0.key)", abbr: stateAbbr[$0.key] ?? "", count: $0.value) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private func countiesLevel(_ state: UInt64) -> [(id: UInt64, name: String, count: Int)] {
-        var counts: [UInt64: Int] = [:]
-        for sys in rows {
-            for c in sys.counties where countyToState[c] == state { counts[c, default: 0] += 1 }
-        }
-        return counts.map { (id: $0.key, name: countyNames[$0.key] ?? "County \($0.key)", count: $0.value) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private func systems(inCounty county: UInt64) -> [CatalogSystem] {
-        rows.filter { $0.counties.contains(county) }.sorted { $0.name < $1.name }
-    }
-
-    /// Systems tagged with a given AreaState id (used for states with no county
-    /// breakdown, e.g. the `_MultipleStates` nationwide bucket).
-    private func systemsInState(_ state: UInt64) -> [CatalogSystem] {
-        rows.filter { $0.states.contains(state) }.sorted { $0.name < $1.name }
-    }
-
-    /// Which country split a nationwide/interstate system belongs to. Primary
-    /// signal is the countries its geo-placed counties fall in (trunked networks
-    /// like ARMER/AWIN/Duke resolve here); reinforced/back-stopped by the
-    /// RadioReference `- USA` / `- CAN` name-suffix convention.
-    private func nationwideGroup(of sys: CatalogSystem) -> NationwideGroup {
-        var countries = Set(
-            sys.counties
-                .compactMap { countyToState[$0] }
-                .compactMap { stateToCountry[$0] })
-        let n = sys.name.uppercased()
-        if n.contains(" - USA") { countries.insert(1) }
-        // The `- CAN` suffix plus Canada-specific tells: ICAO `(CZ…` airspace codes
-        // (Edmonton (CZEG), Gander (CZQX)…), the word Canada, and parenthesized
-        // provinces — these wide-area systems have no county placement to geo-locate.
-        let caTells = [
-            " - CAN", "(CZ", "CANADA", "CANADIAN", "(QUEBEC)", "(ONTARIO)", "(ALBERTA)",
-            "(MANITOBA)", "(SASKATCHEWAN)", "(NOVA SCOTIA)", "(NEW BRUNSWICK)",
-            "(BRITISH COLUMBIA)", "(NEWFOUNDLAND)",
-        ]
-        if caTells.contains(where: n.contains) { countries.insert(2) }
-        let us = countries.contains(1)
-        let ca = countries.contains(2)
-        if us && ca { return .crossborder }
-        if ca { return .canada }
-        if us { return .us }
-        return .crossborder  // unclassifiable → catch-all
-    }
-
-    /// The nationwide/interstate systems (`_MultipleStates`, AreaState 0) in one
-    /// country split, alphabetical.
-    private func nationwideSystems(in group: NationwideGroup) -> [CatalogSystem] {
-        systemsInState(0).filter { nationwideGroup(of: $0) == group }
-    }
-
-    /// Systems with no-county (statewide-residual) channels for a given state.
-    private func statewideSystems(_ state: UInt64) -> [CatalogSystem] {
-        rows.filter { $0.statewide && $0.states.contains(state) }.sorted { $0.name < $1.name }
-    }
-
-    private var systemsMatching: [CatalogSystem] {
-        rows.sorted { $0.name < $1.name }
-    }
-
-    /// Channel-cache key — channels differ per county scope (nil = all/flat).
-    private func cacheKey(_ sys: CatalogSystem, _ county: UInt64?) -> String {
-        "\(sys.id)|\(county.map(String.init) ?? "all")"
-    }
-
     // MARK: - Actions
 
     /// Auto-detect a connected scanner card (USB mass storage) and open it.
@@ -1996,7 +2114,6 @@ struct CatalogView: View {
         loadFraction = 0
         loadPhase = "Reading files…"
         status = ""
-        let f = filter
         DispatchQueue.global(qos: .userInitiated).async {
             // Fast path: if this is a live card whose browse DB is unchanged since its
             // last backup, read the heavy browse library from the SSD backup instead
@@ -2030,10 +2147,9 @@ struct CatalogView: View {
                 return
             }
             let loadedFromBackup = fromBackup && openedFrom != path
-            // Stats + masters + the first catalog query, still off-main.
+            // Stats + masters, still off-main.
             let stats = lib.stats()
             let masters = Masters.load(fromDirectory: openedFrom)
-            let rows = lib.catalog(f)
             let cardEval = evaluateCardStatus(hpdbDir: path) { frac in
                 DispatchQueue.main.async {
                     loadPhase = "Checking backup status…"
@@ -2045,19 +2161,17 @@ struct CatalogView: View {
                 self.libraryDir = path
                 self.stats = stats
                 self.applyMasters(masters)
-                self.rows = rows
-                self.expanded.removeAll()
-                self.channelCache.removeAll()
-                self.selectedCountry = nil
-                self.selectedState = nil
-                self.selectedCounty = nil
-                self.selectedNationwideGroup = nil
+                // The loaded card/backup becomes the HPDB browse source (enabled), and the browse
+                // aggregator re-queries the current location across it + any other active source.
+                self.dataSources.addHpdb(folderPath: openedFrom)
+                self.syncAggregator()
+                self.refresh()
                 self.cardModified = false
                 self.applyCardLoadStatus(cardEval)
                 self.reloadCardInfo()  // also re-baselines the working set
                 self.loadFraction = 1
                 self.loading = false
-                self.status = rows.isEmpty ? "No systems found." : ""
+                self.status = ""
                 if loadedFromBackup {
                     self.flashStatus(
                         "Card browse data unchanged since backup — loaded instantly from your "
@@ -2208,60 +2322,247 @@ struct CatalogView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 
+    /// Re-query every active source at the current location and clear the drill caches. The merged
+    /// rows land on `browse.rows` (async); map pins are fetched by the Map lens on demand. Search /
+    /// filter re-run through here.
     private func refresh() {
-        guard let library else { return }
-        // Conventional-only radios (clone-image HTs) can't use trunked systems — hide them so
-        // browse/map show only what the active radio can program.
-        rows = conventionalOnly ? library.catalog(filter).filter { !$0.isTrunk } : library.catalog(filter)
+        browse.refresh(filter)
         channelCache.removeAll()
+        rrCategories.removeAll()
         expanded.removeAll()
-        status = rows.isEmpty ? "No systems match the current filters." : ""
+        expandedCats.removeAll()
+        rrChannelsInFlight.removeAll()
+        status = browse.activeCount == 0
+            ? "Open a card or backup folder — or add a data source — to browse systems by location."
+            : ""
     }
 
-    /// Load a system's channels, scoped to `county` (nil = all; 0 = no-county/statewide).
-    /// A nationwide/multi-state system's channels are bucketed by geography, so a
-    /// given county/statewide scope can legitimately be empty even though the system
-    /// has channels — in that case fall back to the system's full channel list so a
-    /// drill-in always shows what's there (rather than an empty expand).
-    private func loadChannels(_ sys: CatalogSystem, county: UInt64?) -> [CatalogChannel] {
-        let key = cacheKey(sys, county)
-        if let cached = channelCache[key] { return cached }
-        var chans: [CatalogChannel] = []
-        if let county {
-            chans = library?.countyChannels(systemID: sys.id, county: county, filter) ?? []
-            if chans.isEmpty {
-                chans = library?.channels(systemID: sys.id, filter) ?? []
+    // MARK: - Location (the universal query)
+
+    /// Set the browse location from a typed ZIP / place (Apple geocoding — no API key), resolving a
+    /// coordinate (all sources) and keeping the ZIP (for ZIP-query sources like RadioReference).
+    private func setLocation(query: String) {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count >= 3 else { return }
+        geocoding = true
+        browseError = nil
+        CLGeocoder().geocodeAddressString(q) { placemarks, _ in
+            DispatchQueue.main.async {
+                geocoding = false
+                guard let coord = placemarks?.first?.location?.coordinate else {
+                    browseError = "Couldn't find “\(q)”. Try a ZIP, city, or address."
+                    return
+                }
+                let zip = placemarks?.first?.postalCode ?? (q.allSatisfy(\.isNumber) ? q : nil)
+                browse.location = BrowseLocation(
+                    label: placemarks?.first?.locality ?? q, coordinate: coord,
+                    radiusMi: browseRadius, zip: zip)
+                refresh()
             }
-        } else {
-            chans = library?.channels(systemID: sys.id, filter) ?? []
         }
-        channelCache[key] = chans
-        return chans
     }
 
-    private func toggleExpand(_ sys: CatalogSystem, county: UInt64?) {
-        if expanded.contains(sys.id) {
-            expanded.remove(sys.id)
-        } else {
-            _ = loadChannels(sys, county: county) // prefetch before the view reads the cache
-            expanded.insert(sys.id)
+    /// Set the browse location from a coordinate (the map's search / locate) — reverse-geocode it to
+    /// a label + ZIP so ZIP-query sources resolve.
+    private func setLocation(coord: CLLocationCoordinate2D) {
+        geocoding = true
+        browseError = nil
+        CLGeocoder().reverseGeocodeLocation(
+            CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        ) { placemarks, _ in
+            DispatchQueue.main.async {
+                geocoding = false
+                let pm = placemarks?.first
+                browse.location = BrowseLocation(
+                    label: pm?.locality ?? pm?.postalCode ?? "Map location", coordinate: coord,
+                    radiusMi: browseRadius, zip: pm?.postalCode)
+                refresh()
+            }
         }
+    }
+
+    /// "Near me": take a one-shot device fix, then set the location there.
+    private func setLocationNearMe() {
+        geocoding = true
+        browseError = nil
+        rrLocator.locate { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let coord):
+                    setLocation(coord: coord)
+                case .failure(let err):
+                    geocoding = false
+                    browseError = "Location unavailable: \(err.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Force-refresh cache-backed sources (Radio Reference) for the current location, then re-query.
+    /// Networked → runs off the main thread behind the chip spinner.
+    private func refreshBrowseCaches() {
+        geocoding = true
+        browseError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            browse.refreshCaches()
+            DispatchQueue.main.async {
+                geocoding = false
+                refresh()
+            }
+        }
+    }
+
+    /// Start (or restart) progressively warming the map's real pin positions for the current
+    /// location: the pins paint instantly at the county centroid, then each trunked system's true
+    /// site is fetched one at a time in the background (throttled), reloading the map after each so
+    /// pins spread out without ever blocking. A new location/lens change supersedes an in-flight run.
+    private func startMapWarm() {
+        warmGen += 1
+        guard lens == .map, let loc = browse.location, browse.activeCount > 0 else { return }
+        warmStep(gen: warmGen, loc: loc)
+    }
+
+    /// One warm step (recurses on the main thread so `@State` is only touched there): warm a batch of
+    /// pins off-main (fetched concurrently in Rust), then — if still current — reload the map and
+    /// schedule the next batch. Because warming never opens a session, a `0` early on can just mean the
+    /// location's session isn't open yet (the rows/map load opens it) — so poll a bounded number of
+    /// times before concluding the county is fully warmed.
+    private func warmStep(gen: Int, loc: BrowseLocation, idle: Int = 0) {
+        guard gen == warmGen, lens == .map else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let warmed = browse.warmNextPins(at: loc, batch: 6)
+            DispatchQueue.main.async {
+                guard gen == warmGen, lens == .map else { return }
+                if warmed > 0 {
+                    mapPinToken += 1  // reload the map → this batch's pins snap to their real sites
+                    warmStep(gen: gen, loc: loc)  // reset idle
+                } else if idle < 8 {
+                    // Session may not be open yet — poll briefly, then give up (fully warmed / nothing).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        warmStep(gen: gen, loc: loc, idle: idle + 1)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A compact "as of" label for the freshness caption — "today" / "2d ago" / an absolute date.
+    private func asOfText(_ date: Date) -> String {
+        let days = Calendar.current.dateComponents([.day], from: date, to: Date()).day ?? 0
+        switch days {
+        case ..<1: return "today"
+        case 1: return "yesterday"
+        case 2...30: return "\(days)d ago"
+        default: return date.formatted(.dateTime.month(.abbreviated).day())
+        }
+    }
+
+    /// Change the browse radius and re-query (HPDB scopes its data to it; also the map ring default).
+    private func setRadius(_ mi: Double) {
+        browseRadius = mi
+        if let loc = browse.location {
+            browse.location = BrowseLocation(
+                label: loc.label, coordinate: loc.coordinate, radiusMi: mi, zip: loc.zip)
+            refresh()
+        }
+    }
+
+    // MARK: - Drill (universal — routed to each row's source)
+
+    private func toggleExpand(_ sys: CatalogSystem) {
+        let ck = sys.compositeID
+        if expanded.contains(ck) {
+            expanded.remove(ck)
+        } else {
+            expanded.insert(ck)
+            drill(sys)
+        }
+    }
+
+    /// Drill a system: ask its source for categories (trunked → local-first talkgroup groups), else
+    /// its channels directly. Networked sources fetch off-main; the row shows a spinner until filled.
+    private func drill(_ sys: CatalogSystem) {
+        let ck = sys.compositeID
+        guard rrCategories[ck] == nil, channelCache[ck] == nil, !rrChannelsInFlight.contains(ck)
+        else { return }
+        let showAll = rrShowAllCats.contains(ck)
+        let f = filter
+        rrChannelsInFlight.insert(ck)
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let cats = browse.categories(for: sys, includeAll: showAll) {
+                // A single category is just its talkgroups — fetch them so the extra level is skipped.
+                let onlyChans = cats.count == 1
+                    ? browse.categoryChannels(for: sys, category: cats[0].id, f) : nil
+                DispatchQueue.main.async {
+                    rrCategories[ck] = cats
+                    rrChannelsInFlight.remove(ck)
+                    if cats.count == 1 {
+                        expandedCats.insert("\(ck)|\(cats[0].id)")
+                        channelCache["\(ck)|\(cats[0].id)"] = onlyChans
+                    }
+                }
+            } else {
+                let chans = browse.channels(for: sys, f)
+                DispatchQueue.main.async {
+                    channelCache[ck] = chans
+                    rrChannelsInFlight.remove(ck)
+                }
+            }
+        }
+    }
+
+    /// Toggle a talkgroup category open/closed, lazily fetching its channels via the row's source.
+    private func toggleCategory(_ sys: CatalogSystem, _ catId: Int) {
+        let key = "\(sys.compositeID)|\(catId)"
+        if expandedCats.contains(key) {
+            expandedCats.remove(key)
+            return
+        }
+        expandedCats.insert(key)
+        guard channelCache[key] == nil, !rrChannelsInFlight.contains(key) else { return }
+        rrChannelsInFlight.insert(key)
+        let f = filter
+        DispatchQueue.global(qos: .userInitiated).async {
+            let chans = browse.categoryChannels(for: sys, category: catId, f)
+            DispatchQueue.main.async {
+                channelCache[key] = chans
+                rrChannelsInFlight.remove(key)
+            }
+        }
+    }
+
+    /// Reveal a trunked system's out-of-area categories, then re-fetch the full category list.
+    private func showAllAreas(_ sys: CatalogSystem) {
+        let ck = sys.compositeID
+        rrShowAllCats.insert(ck)
+        rrCategories[ck] = nil
+        rrChannelsInFlight.remove(ck)
+        drill(sys)
     }
 
     // MARK: - Adding to the open list ("add this to my favorite here")
 
-    /// Add a catalog system's (county-scoped) channels to the open favorites list.
-    private func addSystemToSelected(_ sys: CatalogSystem, county: UInt64?) {
-        addChannels(loadChannels(sys, county: county))
+    /// Add a system's channels to the open target — from the drill cache if present, else fetched
+    /// from its source off-main.
+    private func addSystemToSelected(_ sys: CatalogSystem) {
+        let ck = sys.compositeID
+        if let chans = channelCache[ck] { addChannels(chans); return }
+        let f = filter
+        DispatchQueue.global(qos: .userInitiated).async {
+            let chans = browse.channels(for: sys, f)
+            DispatchQueue.main.async { addChannels(chans) }
+        }
     }
 
-    /// Add a map system's channels scoped to the map center + radius — only the
-    /// departments near the point, not the whole (possibly statewide) system.
-    private func addSystemRadiusToSelected(_ id: String, lat: Double, lon: Double, miles: Double) {
-        // Expand from the library the map is actually showing (an added HPDB source, or the
-        // editor library) so pin ids resolve; a clone radio rebuilds channels self-contained.
-        guard let src = mapSourceLibrary else { return }
-        addChannels(src.radiusChannels(systemID: id, lat: lat, lon: lon, miles: miles, filter))
+    /// Add a map pin's channels scoped to the map center + radius (only what's near here). Routes to
+    /// the owning source by the pin's namespaced id; gated on that source supporting `.addToRadio`.
+    private func addSystemRadiusToSelected(_ nsId: String, lat: Double, lon: Double, miles: Double) {
+        guard let (kind, localId) = Self.splitNamespace(nsId) else { return }
+        let f = filter
+        DispatchQueue.global(qos: .userInitiated).async {
+            let chans = browse.channelsForPin(localId, source: kind, lat: lat, lon: lon, miles: miles, f)
+            DispatchQueue.main.async { addChannels(chans) }
+        }
     }
 
     /// Route a set of catalog channels to the active target: a clone-image radio's memory
@@ -2281,26 +2582,11 @@ struct CatalogView: View {
         }
     }
 
-    /// Append library channel ids to the open list (staged; deduped in the core).
+    /// Append library channel ids to the open list (staged; deduped in the core). Only HPDB channels
+    /// resolve against the loaded library — other sources' card-write lands later.
     private func addToSelected(_ channelIDs: [String]) {
         guard let library, !channelIDs.isEmpty else { return }
         mutateSelectedContent { library.appendToFavorites($0, channelIDs: channelIDs, departmentsOn: false) }
-    }
-
-    /// Add every system currently in view to the open list.
-    private func addAllInView() {
-        let scope: [CatalogSystem]
-        if searching {
-            scope = systemsMatching
-        } else if let c = selectedCounty {
-            scope = c == 0 ? statewideSystems(selectedState ?? 0) : systems(inCounty: c)
-        } else {
-            scope = []
-        }
-        let county: UInt64? = searching ? nil : selectedCounty
-        var chans: [CatalogChannel] = []
-        for sys in scope { chans += loadChannels(sys, county: county) }
-        addChannels(chans)
     }
 
     // MARK: - The staged working set (right editor)
@@ -2796,13 +3082,16 @@ struct CatalogView: View {
             cardVolumeName = ""
             cardModified = false
             cardBackedUp = false
-            // The card is gone — drop the library + card state.
+            // The card is gone — drop the editor library + card state. If it was also the HPDB
+            // browse source (no separate map folder), forget that too and re-query what's left.
             library = nil
             libraryDir = nil
-            rows = []
             cardInfo = nil
-            selectedCountry = nil; selectedState = nil; selectedCounty = nil
-            selectedNationwideGroup = nil
+            if mapLibrary == nil {
+                dataSources.signOutHpdb()
+                syncAggregator()
+                refresh()
+            }
             syncWorkingLists()  // cardInfo is nil now → clears the working set
         } catch {
             status = "Eject failed: \(error.localizedDescription) — close anything using the card and retry."

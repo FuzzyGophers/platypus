@@ -10,7 +10,14 @@ import SwiftUI
 /// the cart, or **Add area** to add every system in range. Shares the catalog filter
 /// + cart, so it's just another way to select.
 struct MapLensView: View {
-    let library: ScannerLibrary?
+    /// Geo-located systems within `miles` of a point — supplied by the active browse source (an
+    /// HPDB library or a RadioReference session), so the map isn't tied to one source type.
+    let geo: (_ lat: Double, _ lon: Double, _ miles: Double, _ filter: FilterState) -> [GeoSystem]
+    /// A system's radius-scoped channels for the info popover / add. Empty for browse-only sources
+    /// (e.g. RadioReference) that don't support "add near here" yet.
+    let radiusChannels:
+        (_ systemID: String, _ lat: Double, _ lon: Double, _ miles: Double, _ filter: FilterState)
+            -> [CatalogChannel]
     let filter: FilterState
     /// Whether a favorites list is open to add into.
     let canAdd: Bool
@@ -19,8 +26,21 @@ struct MapLensView: View {
     var conventionalOnly: Bool = false
     /// Name of the open favorites list, for the confirm dialog.
     let listName: String?
+    /// When set (a location-queryable source like RadioReference has a fetched location), the map
+    /// auto-centers there and loads on open — no "pan and Load here" step. Nil for HPDB (nationwide).
+    var initialCenter: CLLocationCoordinate2D? = nil
+    /// For a location-queryable source: searching a place / "locate me" *fetches* that location's
+    /// systems (rather than just panning). When set, the map's search + locate route here; the
+    /// resulting `initialCenter` change recenters + loads. Nil for HPDB (in-memory, pan-to-load).
+    var onLocationSearch: ((CLLocationCoordinate2D) -> Void)? = nil
+    /// Changes whenever the active source set changes — the lens re-queries so a removed source's
+    /// pins drop (and an added source's appear) without needing a pan/filter change.
+    var reloadToken: String = ""
+    /// Per-pin add gate — a source without `.addToRadio` (RadioReference) can be browsed on the map
+    /// but not programmed, so its pins' Add button is disabled. Default: all pins addable.
+    var addAllowed: ((GeoSystem) -> Bool)? = nil
     /// Add a system (by `d<i>s<j>` id) to the open list, scoped to the current map
-    /// center + radius (only the departments near here).
+    /// center + radius (only the departments near here). Declared last so it takes the trailing closure.
     let onAdd: (_ systemID: String, _ lat: Double, _ lon: Double, _ miles: Double) -> Void
 
     @State private var camera: MapCameraPosition = .region(
@@ -39,6 +59,10 @@ struct MapLensView: View {
     /// True once the user has done an initial "Load here"; afterward the lens re-queries
     /// live as the radius or the map viewport changes, so the pins track the ring.
     @State private var live = false
+    /// The center the shared location is currently anchored to. When a manual pan drifts beyond the
+    /// ring from here, we re-anchor to the new center (so location-scoped sources follow the pan). Set
+    /// on every (re-)anchor to dedup and to reset the drift baseline.
+    @State private var lastAnchoredCenter: CLLocationCoordinate2D?
 
     /// Count of in-range systems staged for the "Add area" confirmation (nil = no dialog).
     @State private var pendingArea: Int?
@@ -48,8 +72,15 @@ struct MapLensView: View {
     @State private var infoID: String?
     /// The open net's radius-scoped channels — fetched once when its popover opens.
     @State private var infoChannels: [CatalogChannel] = []
+    /// True while the info popover's channels are loading (a networked source).
+    @State private var infoLoading = false
 
-    private func color(_ s: GeoSystem) -> Color { ServiceType.info(s.serviceType).color }
+    /// Pin + coverage-ring color. Falls back to the accent (not the muted "Other" gray) when the
+    /// service type is unknown, so pins and their hover rings stay visible — e.g. RadioReference
+    /// systems, which don't carry a dominant service type until a system is drilled.
+    private func color(_ s: GeoSystem) -> Color {
+        s.serviceType == nil ? Theme.accent : ServiceType.info(s.serviceType).color
+    }
     private func meters(_ mi: Double) -> Double { mi * 1609.34 }
 
     var body: some View {
@@ -77,10 +108,19 @@ struct MapLensView: View {
             .onMapCameraChange(frequency: .onEnd) { ctx in
                 center = ctx.region.center
                 if live { load() }
+                maybeReanchor()
             }
             // The catalog filter (service type / tech / text) is shared — re-query the lens when
             // it changes so the pins reflect the active filter.
             .onChange(of: filter) { if live { load() } }
+            // A location-queryable source arrives with a known location — center + load immediately
+            // (no "pan and Load here"), so switching to the map just shows what you searched. The
+            // onChange picks up a new location fetched from *either* lens (chip, map search, locate).
+            .onAppear { if let c = initialCenter { recenter(on: c) } }
+            .onChange(of: initialCenter?.latitude) { if let c = initialCenter { recenter(on: c) } }
+            .onChange(of: initialCenter?.longitude) { if let c = initialCenter { recenter(on: c) } }
+            // The active source set changed (a source was toggled off/on) — re-query so pins track it.
+            .onChange(of: reloadToken) { if live { load() } }
 
             searchBar
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -104,6 +144,7 @@ struct MapLensView: View {
             .overlay(Circle().stroke(.white, lineWidth: 1.5))
             .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
             .contentShape(Circle())
+            .modifier(AppearIn())  // gently fade + scale in as its site warms (no teleport)
             .onHover { hoveredID = $0 ? sys.id : nil }
             .onTapGesture { openInfo(sys) }
             .popover(isPresented: infoBinding(sys.id), arrowEdge: .top) { infoPopover(sys) }
@@ -126,11 +167,21 @@ struct MapLensView: View {
         Binding(get: { infoID == id }, set: { if !$0 { infoID = nil } })
     }
 
-    /// Open the info popover for a net, loading the same radius-scoped channels that "Add" appends.
+    /// Open the info popover for a net, loading its local channels. The provider may be networked
+    /// (RadioReference), so run it off-main and show a loading state.
     private func openInfo(_ sys: GeoSystem) {
         infoID = sys.id
-        infoChannels = library?.radiusChannels(
-            systemID: sys.id, lat: center.latitude, lon: center.longitude, miles: radiusMi, filter) ?? []
+        infoChannels = []
+        infoLoading = true
+        let (id, clat, clon, r, f) = (sys.id, center.latitude, center.longitude, radiusMi, filter)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let chans = radiusChannels(id, clat, clon, r, f)
+            DispatchQueue.main.async {
+                guard infoID == id else { return }  // popover still open for this pin
+                infoChannels = chans
+                infoLoading = false
+            }
+        }
     }
 
     @ViewBuilder private func infoPopover(_ sys: GeoSystem) -> some View {
@@ -150,12 +201,22 @@ struct MapLensView: View {
             HStack(spacing: 6) {
                 metaBadge(sys.kind == "Trunk" ? "Trunk" : "Conventional")
                 if let tech = sys.tech, !tech.isEmpty { metaBadge(tech) }
+                sourceChip(sys.source)
                 Spacer()
                 Text("~\(Int(sys.rangeMi)) mi").font(.system(size: 10.5)).foregroundStyle(Theme.fg3)
             }
-            Text("\(infoChannels.count) \(allTalkgroups ? "talkgroups" : "channels")")
-                .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.fg2)
-            if infoChannels.isEmpty {
+            if infoLoading {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading channels…").font(.system(size: 11)).foregroundStyle(Theme.fg3)
+                }
+            } else {
+                Text("\(infoChannels.count) \(allTalkgroups ? "talkgroups" : "channels")")
+                    .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.fg2)
+            }
+            if infoLoading {
+                EmptyView()
+            } else if infoChannels.isEmpty {
                 Text("No channels in range.").font(.system(size: 11)).foregroundStyle(Theme.fg3)
             } else {
                 ScrollView {
@@ -178,14 +239,16 @@ struct MapLensView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 200)
+                // A definite height so the ScrollView actually scrolls (its ideal height is ~0, so a
+                // bare maxHeight collapses it to one row inside a self-sizing popover).
+                .frame(height: min(200, CGFloat(infoChannels.count) * 26 + 4))
             }
             Divider().overlay(Theme.border)
             Button { addFromInfo(sys) } label: {
                 Label("Add to “\(listLabel)”", systemImage: "plus.circle")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent).controlSize(.small).disabled(!canAdd)
+            .buttonStyle(.borderedProminent).controlSize(.small).disabled(!canAdd || !canAddPin(sys))
         }
         .padding(14)
         .frame(width: 280)
@@ -197,6 +260,19 @@ struct MapLensView: View {
             .background(Theme.chip).foregroundStyle(Theme.fg2)
             .clipShape(RoundedRectangle(cornerRadius: Theme.rChip))
     }
+
+    /// Provenance chip (tinted dot + short label) so a pin says which source it came from.
+    private func sourceChip(_ kind: DataSourceKind) -> some View {
+        HStack(spacing: 3) {
+            Circle().fill(kind.tint).frame(width: 6, height: 6)
+            Text(kind.badge).font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.fg2)
+        }
+        .padding(.horizontal, 5).padding(.vertical, 2)
+        .background(Theme.chip).clipShape(Capsule())
+    }
+
+    /// Whether this pin's source permits programming its channels (else browse-only).
+    private func canAddPin(_ sys: GeoSystem) -> Bool { addAllowed?(sys) ?? true }
 
     /// Append this net (radius-scoped) to the open list, then close the popover.
     private func addFromInfo(_ sys: GeoSystem) {
@@ -263,10 +339,18 @@ struct MapLensView: View {
 
     private func load() {
         live = true
-        var found = library?.geo(lat: center.latitude, lon: center.longitude, miles: radiusMi, filter) ?? []
-        if conventionalOnly { found = found.filter { $0.kind != "Trunk" } }
-        systems = found
-        status = systems.isEmpty ? "No systems with coverage here." : ""
+        // The geo provider can be slow the first time (a network source fetches site locations), so
+        // run it off-main and show a locating state; instant thereafter (cached).
+        let (clat, clon, r, f, conv) = (center.latitude, center.longitude, radiusMi, filter, conventionalOnly)
+        if systems.isEmpty { status = "Locating systems…" }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var found = geo(clat, clon, r, f)
+            if conv { found = found.filter { $0.kind != "Trunk" } }
+            DispatchQueue.main.async {
+                systems = found
+                status = systems.isEmpty ? "No systems with coverage here." : ""
+            }
+        }
     }
 
     /// Geocode a ZIP / city / address (Apple's `CLGeocoder`, no API key), recenter the
@@ -283,7 +367,12 @@ struct MapLensView: View {
                     status = "Couldn't find “\(q)”. Try a ZIP, city, or address."
                     return
                 }
-                recenter(on: coord)
+                if let onLocationSearch {
+                    status = "Fetching systems…"
+                    onLocationSearch(coord)  // the resulting location change recenters + loads
+                } else {
+                    recenter(on: coord)
+                }
             }
         }
     }
@@ -296,7 +385,13 @@ struct MapLensView: View {
         locator.locate { result in
             locating = false
             switch result {
-            case .success(let coord): recenter(on: coord)
+            case .success(let coord):
+                if let onLocationSearch {
+                    status = "Fetching systems…"
+                    onLocationSearch(coord)
+                } else {
+                    recenter(on: coord)
+                }
             case .failure(let err):
                 systems = []
                 status = err.localizedDescription
@@ -307,13 +402,44 @@ struct MapLensView: View {
     /// Recenter the map + radius ring on `coord` and load the systems in range. Shared by the
     /// ZIP/place search and the "center on me" button.
     private func recenter(on coord: CLLocationCoordinate2D) {
+        // A "jump" (search / locate / switch) moves somewhere new → reframe to the ring and show the
+        // loading state. A pan-anchor lands ~where the user already is → keep their pan/zoom untouched
+        // and just reload the data there, so re-anchoring after a drag doesn't yank the camera.
+        let jumped = milesBetween(coord, center) > 3
+        lastAnchoredCenter = coord
         center = coord
-        let deg = Self.frameSpanDegrees(radiusMi: radiusMi)
-        camera = .region(
-            MKCoordinateRegion(
-                center: coord,
-                span: MKCoordinateSpan(latitudeDelta: deg, longitudeDelta: deg)))
+        if jumped {
+            // Drop the previous location's pins so the switch shows the "Locating…" state during the
+            // fetch rather than a blank recentered map with stale, off-screen pins. (Warm reloads go
+            // through `load()` via `reloadToken`, not here, so incremental pin bursts don't flicker.)
+            systems = []
+            status = "Locating systems…"
+            let deg = Self.frameSpanDegrees(radiusMi: radiusMi)
+            camera = .region(
+                MKCoordinateRegion(
+                    center: coord,
+                    span: MKCoordinateSpan(latitudeDelta: deg, longitudeDelta: deg)))
+        }
         load()
+    }
+
+    /// After a manual pan settles, if the view has drifted beyond the ring from the anchored location,
+    /// re-anchor the **shared location** to the new center (reverse-geocoded upstream via
+    /// `onLocationSearch`) so location-scoped sources (RadioReference) load the new area too — no
+    /// button, source-agnostic. The drift threshold + `lastAnchoredCenter` dedup keep ordinary
+    /// panning/zoom within an area from refetching.
+    private func maybeReanchor() {
+        guard live, let onLocationSearch else { return }
+        let baseline = lastAnchoredCenter ?? initialCenter
+        guard let baseline, milesBetween(center, baseline) > radiusMi else { return }
+        lastAnchoredCenter = center  // dedup until the upstream anchor catches up
+        onLocationSearch(center)
+    }
+
+    /// Great-circle distance between two coordinates, in miles.
+    private func milesBetween(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
+        CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude)) / 1609.34
     }
 
     /// Latitude/longitude span (degrees) that frames a radius ring comfortably (~1° lat ≈ 69 mi).
@@ -390,5 +516,20 @@ final class LocationFinder: NSObject, ObservableObject, CLLocationManagerDelegat
         guard let cb = onFix else { return }
         onFix = nil
         DispatchQueue.main.async { cb(result) }
+    }
+}
+
+/// Fade + scale a map pin in the first time it renders, so a warmed-in pin arrives gently rather than
+/// popping/teleporting. The annotation `ForEach` is keyed by system id, so only *new* pins run
+/// `onAppear` — existing ones are reused and hold their place.
+private struct AppearIn: ViewModifier {
+    @State private var shown = false
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(shown ? 1 : 0.4)
+            .opacity(shown ? 1 : 0)
+            .onAppear {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { shown = true }
+            }
     }
 }
