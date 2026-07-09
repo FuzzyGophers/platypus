@@ -21,6 +21,7 @@ path = [
   "**/*.md",
   "assets/**",
   "samples/**",
+  "crates/platypus-rr/tests/fixtures/**",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "The Platypus Authors"

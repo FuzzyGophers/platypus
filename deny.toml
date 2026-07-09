@@ -23,6 +23,17 @@ confidence-threshold = 0.9
 # core), so don't warn that some allowances are currently unused.
 unused-allowed-license = "allow"
 
+# Scoped exception — the ONLY place Apache-2.0 is tolerated, and only for the crate
+# that binds the OS's OpenSSL on Linux. platypus-rr's optional `http` feature routes
+# through native OS TLS (`native-tls`): Secure Transport on macOS and SChannel on
+# Windows are Apache-2.0-free, but on Linux it dynamically links the system OpenSSL —
+# the GPLv2 §3 system-library exception. `openssl-sys` (the FFI shim) is MIT; only the
+# high-level `openssl` crate is Apache-2.0-only. The global allow-list above stays
+# Apache-2.0-free, so nothing else can slip Apache-2.0 in unnoticed.
+[[licenses.exceptions]]
+name = "openssl"
+allow = ["Apache-2.0"]
+
 [advisories]
 # RustSec advisory DB: fail on known-vulnerable or yanked crates.
 yanked = "deny"

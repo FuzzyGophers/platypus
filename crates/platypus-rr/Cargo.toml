@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (C) 2026 The Platypus Authors
+[package]
+name = "platypus-rr"
+version.workspace = true
+edition = "2021"
+description = "RadioReference SOAP client for Platypus — fetches RR systems (per-user auth) and maps them via platypus-core, so the core stays dependency-free."
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The RadioReference network glue (I/O) sibling of the zero-dep core. The core owns the RR schema +
+# canonical mapping (`platypus_core::rr`); this crate only does the SOAP I/O.
+#
+# HTTPS lives behind the optional `http` feature (off by default, so the core stays sha2-only and
+# app front-ends can keep using their native HTTP via the `request()`/`SoapRequest` seam). When
+# enabled, `ureq` speaks HTTP/1.1 over **native OS TLS** (`native-tls`): Secure Transport on macOS,
+# SChannel on Windows — both SPDX-clean (no Apache-2.0). On Linux `native-tls` dynamically binds the
+# system OpenSSL (the GPLv2 §3 system-library exception); that one `openssl` crate is Apache-2.0 and
+# is allowed via a scoped `[[licenses.exceptions]]` in deny.toml — the global allow-list stays
+# Apache-2.0-free. `ureq`'s `default-features = false` keeps rustls/`ring` out of the tree.
+[dependencies]
+platypus-core = { path = "../platypus-core", version = "0.2.0" }
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
+native-tls = { version = "0.2", optional = true }
+
+[features]
+default = []
+http = ["dep:ureq", "dep:native-tls"]
+
+[[example]]
+name = "fetch_area"
+required-features = ["http"]
+
+[[example]]
+name = "dump"
+required-features = ["http"]

@@ -35,8 +35,12 @@ jobs:
       - name: REUSE compliance
         uses: fsfe/reuse-action@v5
 
+      # `--all-features` so the optional `http` transport's tree is checked too — this is where
+      # the scoped `openssl` (Apache-2.0) license exception in deny.toml gets validated on Linux.
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features
 
       - name: link check (offline)
         uses: lycheeverse/lychee-action@v2
@@ -63,6 +67,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - uses: extractions/setup-just@v2
+
+      # Compile + offline-test the RR `http` transport on its native macOS TLS backend (Secure
+      # Transport); the Linux rust-gate already covers the OpenSSL backend via --all-features.
+      - name: platypus-rr http transport (native TLS)
+        run: cargo test -p platypus-rr --features http
 
       # Build the release FFI staticlib + the Swift app, run the Swift unit tests, and the
       # headless Swift -> FFI -> core smoke against the synthetic fixtures.

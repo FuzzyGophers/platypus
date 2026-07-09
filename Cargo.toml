@@ -5,7 +5,7 @@
 # Future members (not yet present): a CLI, other front-ends, etc. — all built on core.
 [workspace]
 resolver = "2"
-members = ["crates/platypus-core", "crates/platypus-ffi", "crates/platypus-serial"]
+members = ["crates/platypus-core", "crates/platypus-ffi", "crates/platypus-serial", "crates/platypus-rr"]
 
 # Shared package metadata, inherited by the crates via `.workspace = true`.
 [workspace.package]
