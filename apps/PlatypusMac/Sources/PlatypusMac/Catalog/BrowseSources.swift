@@ -143,7 +143,8 @@ final class BrowseSources: ObservableObject {
 }
 
 /// Stable ordering of sources in the merged list (HPDB first as the offline/base source).
-private func kindOrder(_ kind: DataSourceKind) -> Int {
+/// Internal (not private) so the routing tests can assert the order.
+func kindOrder(_ kind: DataSourceKind) -> Int {
     switch kind {
     case .hpdb: return 0
     case .radioReference: return 1

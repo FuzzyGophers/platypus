@@ -185,3 +185,49 @@ final class MapFramingTests: XCTestCase {
         XCTAssertEqual(MapLensView.frameSpanDegrees(radiusMi: 1), 0.15, accuracy: 1e-9)
     }
 }
+
+/// Multi-source browse routing: the `<source>:<localId>` namespacing that keeps browse state
+/// collision-safe across merged sources, and the stable source order in the merged list. All pure.
+final class BrowseRoutingTests: XCTestCase {
+    /// A minimal `CatalogSystem` for the source tag under test (other fields are irrelevant here).
+    private func fixture(id: String, source: DataSourceKind) -> CatalogSystem {
+        var sys = CatalogSystem(
+            id: id, name: "Sys \(id)", kind: "Trunk", tech: nil,
+            counties: [], states: [], statewide: false, siteCount: 0, channelCount: 0)
+        sys.source = source
+        return sys
+    }
+
+    func testCompositeIDNamespacesBySource() {
+        XCTAssertEqual(fixture(id: "x", source: .hpdb).compositeID, "hpdb:x")
+        XCTAssertEqual(fixture(id: "42", source: .radioReference).compositeID, "radioReference:42")
+        // The same local id in two sources stays distinct.
+        XCTAssertNotEqual(
+            fixture(id: "1", source: .hpdb).compositeID,
+            fixture(id: "1", source: .radioReference).compositeID)
+    }
+
+    func testSplitNamespaceRoundTripsCompositeID() {
+        // splitNamespace ∘ compositeID == identity, for every source kind.
+        for kind in DataSourceKind.allCases {
+            let sys = fixture(id: "loc-9", source: kind)
+            let split = CatalogView.splitNamespace(sys.compositeID)
+            XCTAssertEqual(split?.0, kind)
+            XCTAssertEqual(split?.1, "loc-9")
+        }
+        // A local id containing a colon survives (only the first colon splits).
+        let split = CatalogView.splitNamespace("hpdb:a:b")
+        XCTAssertEqual(split?.0, .hpdb)
+        XCTAssertEqual(split?.1, "a:b")
+    }
+
+    func testSplitNamespaceRejectsMalformed() {
+        XCTAssertNil(CatalogView.splitNamespace("nocolon"))
+        XCTAssertNil(CatalogView.splitNamespace("bogus:1")) // unknown source rawValue
+    }
+
+    func testKindOrderPutsHpdbFirst() {
+        XCTAssertLessThan(kindOrder(.hpdb), kindOrder(.radioReference))
+        XCTAssertLessThan(kindOrder(.radioReference), kindOrder(.repeaterBook))
+    }
+}
