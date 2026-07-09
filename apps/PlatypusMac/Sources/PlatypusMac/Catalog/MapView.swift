@@ -50,7 +50,7 @@ struct MapLensView: View {
     @State private var center = CLLocationCoordinate2D(latitude: 39.5, longitude: -98.35)
     @State private var radiusMi: Double = 25
     @State private var systems: [GeoSystem] = []
-    @State private var status = "Pan to your area, set a radius, then Load here."
+    @State private var status = "Pan or zoom to your area — it loads automatically."
     @State private var searchText = ""
     @State private var geocoding = false
     /// True while a current-location fix is pending (drives the spinner + disables the button).
@@ -59,10 +59,13 @@ struct MapLensView: View {
     /// True once the user has done an initial "Load here"; afterward the lens re-queries
     /// live as the radius or the map viewport changes, so the pins track the ring.
     @State private var live = false
-    /// The center the shared location is currently anchored to. When a manual pan drifts beyond the
-    /// ring from here, we re-anchor to the new center (so location-scoped sources follow the pan). Set
-    /// on every (re-)anchor to dedup and to reset the drift baseline.
+    /// The center the shared location is currently anchored to. When navigation moves the center far
+    /// enough from here, we re-anchor to the new center (so location-scoped sources follow the pan/zoom).
+    /// Set on every (re-)anchor to dedup and to reset the movement baseline.
     @State private var lastAnchoredCenter: CLLocationCoordinate2D?
+    /// Debounces the auto-load reverse-geocode so a continuous pan/zoom coalesces into one anchor
+    /// (and stays gentle on Apple's rate-limited geocoder). Cancelled + rescheduled on each move.
+    @State private var reanchorWork: DispatchWorkItem?
 
     /// Count of in-range systems staged for the "Add area" confirmation (nil = no dialog).
     @State private var pendingArea: Int?
@@ -107,8 +110,8 @@ struct MapLensView: View {
                                 pointsOfInterest: .excludingAll, showsTraffic: false))
             .onMapCameraChange(frequency: .onEnd) { ctx in
                 center = ctx.region.center
-                if live { load() }
-                maybeReanchor()
+                if live { load() }  // instant re-filter for coordinate sources between anchors
+                maybeAutoLoad()     // re-derive the shared location when navigation moves far enough
             }
             // The catalog filter (service type / tech / text) is shared — re-query the lens when
             // it changes so the pins reflect the active filter.
@@ -116,7 +119,13 @@ struct MapLensView: View {
             // A location-queryable source arrives with a known location — center + load immediately
             // (no "pan and Load here"), so switching to the map just shows what you searched. The
             // onChange picks up a new location fetched from *either* lens (chip, map search, locate).
-            .onAppear { if let c = initialCenter { recenter(on: c) } }
+            .onAppear {
+                if let c = initialCenter { recenter(on: c) }
+                // No shared location yet → seed the movement baseline at the default center so the
+                // initial settle is a no-move; the first deliberate navigation past the threshold
+                // auto-loads (rather than anchoring the meaningless nationwide default).
+                else { lastAnchoredCenter = center }
+            }
             .onChange(of: initialCenter?.latitude) { if let c = initialCenter { recenter(on: c) } }
             .onChange(of: initialCenter?.longitude) { if let c = initialCenter { recenter(on: c) } }
             // The active source set changed (a source was toggled off/on) — re-query so pins track it.
@@ -321,7 +330,7 @@ struct MapLensView: View {
                 Text("\(Int(radiusMi)) mi").font(.system(size: 12, weight: .semibold)).monospacedDigit()
                     .frame(width: 46, alignment: .leading)
             }
-            Button("Load here", action: load).buttonStyle(.borderedProminent).controlSize(.small)
+            Button("Load here", action: reloadHere).buttonStyle(.borderedProminent).controlSize(.small)
             if !systems.isEmpty, canAdd {
                 Button("Add area (\(systems.count))", action: addArea).controlSize(.small)
             }
@@ -423,17 +432,48 @@ struct MapLensView: View {
         load()
     }
 
-    /// After a manual pan settles, if the view has drifted beyond the ring from the anchored location,
-    /// re-anchor the **shared location** to the new center (reverse-geocoded upstream via
-    /// `onLocationSearch`) so location-scoped sources (RadioReference) load the new area too — no
-    /// button, source-agnostic. The drift threshold + `lastAnchoredCenter` dedup keep ordinary
-    /// panning/zoom within an area from refetching.
-    private func maybeReanchor() {
-        guard live, let onLocationSearch else { return }
+    /// Movement (miles) beyond which navigating the map re-derives the shared location — county-scale,
+    /// scaled to the zoom (radius) with a floor so a small radius doesn't re-anchor on every nudge.
+    private var reanchorThresholdMi: Double { max(8, radiusMi * 0.5) }
+
+    /// Seconds the map must sit **still** on a new area before it auto-loads. Any movement restarts it,
+    /// so a load fires only once the user has settled — one fetch per settled area, never a flood of
+    /// upstream requests (the networked SOAP source + Apple's rate-limited reverse-geocoder) while
+    /// they're still scrubbing around.
+    private static let autoLoadDwell: TimeInterval = 2.0
+
+    /// When map navigation (pan/zoom) settles far enough from the last **loaded** area, re-derive the
+    /// **shared location** from the new center — reverse-geocoded upstream via `onLocationSearch` — so
+    /// every active location-scoped source loads it. No button, no typed ZIP, source-agnostic. Gated by
+    /// two things: a distance threshold (ordinary panning within an area doesn't refetch) and a still-
+    /// dwell (`autoLoadDwell`). **Every** settle cancels the pending timer first, so any movement
+    /// restarts the dwell; the load only runs when the map has rested `autoLoadDwell` seconds.
+    private func maybeAutoLoad() {
+        guard let onLocationSearch else { return }
+        reanchorWork?.cancel()  // any movement cancels/restarts the pending load
         let baseline = lastAnchoredCenter ?? initialCenter
-        guard let baseline, milesBetween(center, baseline) > radiusMi else { return }
-        lastAnchoredCenter = center  // dedup until the upstream anchor catches up
-        onLocationSearch(center)
+        if let baseline, milesBetween(center, baseline) <= reanchorThresholdMi { return }
+        // `lastAnchoredCenter` is intentionally *not* stamped here — it updates only when a load lands
+        // (via `recenter`), so the distance gate keeps measuring against the last loaded area and a
+        // sub-threshold nudge that cancels the timer still reschedules rather than dropping the load.
+        let target = center
+        let work = DispatchWorkItem {
+            live = true
+            status = "Locating systems…"
+            onLocationSearch(target)
+        }
+        reanchorWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoLoadDwell, execute: work)
+    }
+
+    /// "Load here" — force a reload of the current center immediately, bypassing both the distance gate
+    /// and the still-dwell (the manual counterpart to the automatic re-anchor). Falls back to a plain
+    /// in-place load when no upstream location resolver is wired.
+    private func reloadHere() {
+        reanchorWork?.cancel()
+        live = true
+        status = "Locating systems…"
+        if let onLocationSearch { onLocationSearch(center) } else { load() }
     }
 
     /// Great-circle distance between two coordinates, in miles.
