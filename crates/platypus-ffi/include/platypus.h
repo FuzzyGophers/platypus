@@ -41,6 +41,13 @@ typedef struct PlatypusHpdb PlatypusHpdb;
 typedef struct PlatypusLibrary PlatypusLibrary;
 
 /*
+ An open RadioReference browse session: the client + the resolved location + the county system
+ list, plus a lazy cache of fully-fetched systems (keyed by the ref used as each row's JSON `id`:
+ `"t<sid>"` for a trunked system, `"c<scid>"` for a conventional subcategory).
+ */
+typedef struct PlatypusRrSource PlatypusRrSource;
+
+/*
  A C progress callback: `(ctx, phase, done, total)`. Phase 1 = reading files,
  phase 2 = indexing coverage.
  */
@@ -823,6 +830,156 @@ PlatypusFt60 *platypus_ft60_apply_settings(const uint8_t *base,
                                            const uint8_t *values,
                                            size_t values_len,
                                            char **err_out);
+
+/*
+ Validate credentials against RR (`getUserData`) — the "Add source" pre-flight. Returns
+ `{"username","subExpireDate"}` JSON on success, or sets `*err_out` to the RR message (e.g. a bad
+ login fault) and returns null. Bypasses the on-disk cache (the account response is per-user, and
+ the cache key is deliberately credential-free), so this always makes a live check.
+
+ # Safety
+ The C-string params must be valid NUL-terminated or null; `err_out` valid or null.
+ */
+char *platypus_rr_validate(const char *app_key,
+                           const char *username,
+                           const char *password,
+                           char **err_out);
+
+/*
+ Open a browse session for a location. `selector` is `"zip:<zipcode>"` for now (structured so
+ `county:`/`state:`/`metro:`/`prox:` can join later). Runs the cheap two-call location→system-list
+ fetch; per-system channels load lazily via [`platypus_rr_source_channels_json`]. `progress`
+ reports `(ctx, phase, done, total)` (phase 1 = resolving location, 2 = fetching the county list);
+ `cancel` returning nonzero aborts. On failure sets `*err_out` and returns null.
+
+ # Safety
+ C-string params valid NUL-terminated or null; `err_out` valid or null; `ctx` is passed back to
+ the callbacks untouched.
+ */
+PlatypusRrSource *platypus_rr_source_open(const char *app_key,
+                                          const char *username,
+                                          const char *password,
+                                          const char *selector,
+                                          void *ctx,
+                                          PlatypusProgressFn progress,
+                                          PlatypusCancelFn cancel,
+                                          char **err_out);
+
+/*
+ The county's systems as catalog rows (same shape as `platypus_library_catalog_json`). Names come
+ from the one `getCountyInfo` call; `tech`/counts fill in once a system is drilled (cached).
+ Only the `search` (name) filter applies here — service/tech filters need channel data, so they
+ apply in the channel view. Empty array on a null handle.
+
+ # Safety
+ `handle` valid or null; the C-string params valid NUL-terminated or null.
+ */
+char *platypus_rr_source_systems_json(const PlatypusRrSource *handle,
+                                      const char *_services_csv,
+                                      const char *_techs_csv,
+                                      const char *search);
+
+/*
+ Channels of one system (`system_ref` = a row `id`), fetched lazily on first call and cached.
+ Same shape as `platypus_library_channels_json`. Applies the service-type + `search` filters.
+ Empty array on a null handle / bad ref; sets nothing on a fetch error (returns what mapped).
+
+ # Safety
+ `handle` valid or null; the C-string params valid NUL-terminated or null.
+ */
+char *platypus_rr_source_channels_json(PlatypusRrSource *handle,
+                                       const char *system_ref,
+                                       const char *services_csv,
+                                       const char *search);
+
+/*
+ A trunked system's talkgroup **categories**, ranked nearest-first for a location-first drill.
+ `all == 0` returns only in-range + systemwide categories (the local view); `all != 0` includes
+ the out-of-area ones ("show all areas"). Shape:
+ `[{ "id":tgCid,"name","distanceMi":f64|null,"local":bool,"systemwide":bool }]`. Empty array for a
+ non-trunked ref or a null handle.
+
+ # Safety
+ `handle` valid or null; the C-string params valid NUL-terminated or null.
+ */
+char *platypus_rr_source_categories_json(PlatypusRrSource *handle,
+                                         const char *system_ref,
+                                         uint8_t all);
+
+/*
+ A talkgroup category's channels — `getTrsTalkgroups(sid, tgCid)` mapped to channels, fetched
+ lazily and cached. Same shape as [`platypus_rr_source_channels_json`]. Empty array for a
+ non-trunked ref / null handle.
+
+ # Safety
+ `handle` valid or null; the C-string params valid NUL-terminated or null.
+ */
+char *platypus_rr_source_category_channels_json(PlatypusRrSource *handle,
+                                                const char *system_ref,
+                                                uint32_t tg_cid,
+                                                const char *services_csv,
+                                                const char *search);
+
+/*
+ The county's systems as map pins (same shape as `platypus_library_geo_json`). A drilled system
+ uses its nearest site/subcat location; an un-drilled one falls back to the county centroid, so
+ the map is populated immediately and refines as systems are opened. `lat`/`lon`/`miles` are
+ accepted for signature parity with the library but not used to prune (the set is already the one
+ county). Empty array on a null handle.
+
+ # Safety
+ `handle` valid or null; the C-string params valid NUL-terminated or null.
+ */
+char *platypus_rr_source_geo_json(PlatypusRrSource *handle,
+                                  double _lat,
+                                  double _lon,
+                                  double _miles,
+                                  const char *_services_csv,
+                                  const char *_techs_csv,
+                                  const char *search);
+
+/*
+ The resolved location + system count for the browse header (the location chip).
+ Shape: `{ "city","ctid":u64,"stid":u64,"lat":f64,"lon":f64,"systemCount":u64 }`. Null on a null
+ handle.
+
+ # Safety
+ `handle` valid or null.
+ */
+char *platypus_rr_source_location_json(const PlatypusRrSource *handle);
+
+/*
+ Warm trunked systems' real map sites, returning how many were warmed (0 when all are done). Every
+ **already-cached** site is warmed at once (disk hits — instant, so a switch back to a visited county
+ loads immediately); only **live** fetches are paced — at most `batch`, in parallel on forked clients
+ (so the per-client throttle doesn't serialize them). The app calls this in a loop, reloading the map
+ after each call, so first-visit pins refine in bursts without blocking.
+
+ # Safety
+ `handle` valid or null.
+ */
+uint32_t platypus_rr_source_warm_batch(PlatypusRrSource *handle,
+                                       uint32_t batch);
+
+/*
+ Manual "Refresh": force-refetch the location's base data live (bypassing the cache), so a
+ stale-cached county/site set updates on demand. Clears the in-memory memos (drilled talkgroups
+ then refresh per TTL/upstream on next open), re-fetches `getCountyInfo` + the map site geo under
+ the force flag, then clears it. Returns the fresh location JSON (with the new `fetchedAt`), or
+ null on a null handle.
+
+ # Safety
+ `handle` valid or null.
+ */
+char *platypus_rr_source_refresh(PlatypusRrSource *handle);
+
+/*
+ Free a source handle (safe with null).
+
+ # Safety
+ `handle` must be a pointer from [`platypus_rr_source_open`] not already freed, or null.
+ */
+void platypus_rr_source_free(PlatypusRrSource *handle);
 
 #ifdef __cplusplus
 }  // extern "C"

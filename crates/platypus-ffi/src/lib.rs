@@ -30,6 +30,9 @@ use platypus_core::format::{Document, Line, LineEnding};
 use platypus_core::model::{haversine_miles, keyed_id, CountyIndex, Record};
 use platypus_core::{card, favorites};
 
+mod rr;
+pub use rr::*;
+
 /// Opaque handle: a parsed HPDB document plus the profile to interpret it.
 pub struct PlatypusHpdb {
     doc: Document,
@@ -3372,7 +3375,7 @@ pub unsafe extern "C" fn platypus_ft60_apply_settings(
 
 /// Append a JSON-escaped string literal (including the surrounding quotes). The
 /// data is validated ASCII, so we only need to escape `"`, `\`, and controls.
-fn push_json_string(out: &mut String, s: &str) {
+pub(crate) fn push_json_string(out: &mut String, s: &str) {
     out.push('"');
     for ch in s.chars() {
         match ch {
@@ -3388,7 +3391,7 @@ fn push_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
-fn push_f64(out: &mut String, v: f64) {
+pub(crate) fn push_f64(out: &mut String, v: f64) {
     if v.is_finite() {
         out.push_str(&v.to_string());
     } else {
@@ -3399,7 +3402,7 @@ fn push_f64(out: &mut String, v: f64) {
 // ---- pointer helpers ----
 
 /// Borrow a C string as `&str`, or `None` if null / not UTF-8.
-unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
+pub(crate) unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         None
     } else {
@@ -3408,7 +3411,7 @@ unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
 }
 
 /// Move a Rust `String` into a heap C string for the caller to free.
-fn to_c_string(s: String) -> *mut c_char {
+pub(crate) fn to_c_string(s: String) -> *mut c_char {
     match CString::new(s) {
         Ok(c) => c.into_raw(),
         Err(_) => ptr::null_mut(),
@@ -3421,7 +3424,7 @@ fn to_c_string(s: String) -> *mut c_char {
 /// still written not to panic on bad input, so this is defense-in-depth. The `fallback` must be a
 /// value the caller reads as failure for that function — `null` for the JSON/handle getters, a
 /// non-null error string for the "null = success" card writers, `0` for the write status.
-fn ffi_guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
+pub(crate) fn ffi_guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(fallback)
 }
 

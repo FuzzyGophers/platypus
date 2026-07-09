@@ -12,11 +12,14 @@ publish.workspace = true
 [lib]
 name = "platypus_ffi"
 # staticlib: linked directly into the macOS app. cdylib: handy for quick loading/tests.
-crate-type = ["staticlib", "cdylib"]
+# rlib: lets Rust integration tests / examples (e.g. the RR smoke) link the crate.
+crate-type = ["staticlib", "cdylib", "rlib"]
 
-# Results cross the boundary as JSON strings, built by hand (no serde). The one non-core
-# dep is `platypus-serial` (our termios transport) so the FT-60 clone read can be driven
-# from the app; the core itself stays dependency-free.
+# Results cross the boundary as JSON strings, built by hand (no serde). Non-core deps:
+# `platypus-serial` (our termios transport) drives the FT-60 clone read; `platypus-rr` with its
+# `http` feature drives the RadioReference fetch over native OS TLS (Secure Transport on macOS).
+# The core itself stays dependency-free.
 [dependencies]
 platypus-core = { path = "../platypus-core", version = "0.2.0" }
 platypus-serial = { path = "../platypus-serial", version = "0.2.0" }
+platypus-rr = { path = "../platypus-rr", version = "0.2.0", features = ["http"] }
