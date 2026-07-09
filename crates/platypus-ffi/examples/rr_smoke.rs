@@ -11,8 +11,8 @@ use std::ptr;
 use platypus_ffi::{
     platypus_rr_source_categories_json, platypus_rr_source_category_channels_json,
     platypus_rr_source_channels_json, platypus_rr_source_free, platypus_rr_source_geo_json,
-    platypus_rr_source_open, platypus_rr_source_systems_json, platypus_rr_validate,
-    platypus_string_free,
+    platypus_rr_source_open, platypus_rr_source_refresh, platypus_rr_source_systems_json,
+    platypus_rr_source_warm_batch, platypus_rr_validate, platypus_string_free,
 };
 
 fn s(v: &str) -> CString {
@@ -155,6 +155,19 @@ fn main() {
                 .and_then(|s| s.split([',', '}']).next());
             println!("  pin: {:?} @ {:?},{:?}  range={:?}", name, lat, lon, rng);
         }
+
+        // 6) Progressive pin warming — each pass fetches a bounded batch of real site positions
+        //    (cached ones instant, live ones paced); the count falls to 0 once everything is placed.
+        for pass in 1..=5 {
+            let warmed = platypus_rr_source_warm_batch(src, 4);
+            println!("warm pass {pass}: {warmed} sites");
+            if warmed == 0 {
+                break;
+            }
+        }
+
+        // 7) Refresh — bypass the cache, re-fetch the county + site geo, and return the location JSON.
+        println!("refresh: {}", take(platypus_rr_source_refresh(src)));
 
         platypus_rr_source_free(src);
     }
