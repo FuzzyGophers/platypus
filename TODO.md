@@ -12,12 +12,10 @@ Tracked future work. Run `just check` before pushing (see `CLAUDE.md`).
 
 ## UI / data
 
-- **Display customization — verify + polish.** The editor is in: a core round-trip module over
-  `profile.cfg`, the FFI, and an SDS150 gear popup (layout-mode picker, per-area item assignment,
-  per-element colors from the 147-color palette, live per-mode preview). Remaining: hardware-verify
-  the `DisplayOption` col-11 label and the `Backlight` fields, and make the per-mode preview
-  pixel-faithful with exact per-element colors (read from the on-device color menu). Spec + record
-  details in [`docs/radios/sds150-display.md`](docs/radios/sds150-display.md).
+- **Display customization — hardware verification.** Confirm the `DisplayOption` col-11 label and
+  the `Backlight` fields against a real card, and hardware-confirm the per-element area↔`DispColors`
+  group pairing (spec-derived + example-confirmed, not yet verified on-device). Record in
+  [`docs/radios/sds150-display.md`](docs/radios/sds150-display.md).
 
 - **RepeaterBook.com provider (import source #3).** A free JSON API of amateur repeaters —
   the natural data source for the ham/**FT-60** flow (conventional freq + offset + CTCSS/DCS
@@ -36,11 +34,27 @@ Tracked future work. Run `just check` before pushing (see `CLAUDE.md`).
   [`crates/platypus-core/src/provider.rs`](crates/platypus-core/src/provider.rs) and the RR
   sketch in [`crates/platypus-core/src/rr.rs`](crates/platypus-core/src/rr.rs).
 
-- **RadioReference web-service client (provider #2).** Types + canonical mapping are sketched in
-  [`crates/platypus-core/src/rr.rs`](crates/platypus-core/src/rr.rs); **blocked on an RR app
-  key** (free, issued by RR support). Would also fill the band-plan + service-name gaps. Same
-  `Provider` → `Dataset` shape as RepeaterBook; the wire format is SOAP/XML, so the HTTP/XML I/O
-  lives in a `platypus-rr` crate (or the FFI) to keep the core zero-dep.
+- **Location-first map: widen a networked source beyond one county.** The map is coordinate-scoped
+  for local sources but county-scoped for the SOAP web service (its API resolves a place to one county
+  and has no radius query), so panning re-anchors county-by-county. Widening a networked source to a
+  true radius needs per-county centroids the API doesn't provide; a bundled county-centroid table would
+  enable it but requires reliable name matching. Revisit if county-granular coverage isn't enough.
+
+- **Portable geocoding for non-macOS front-ends.** Place/coordinate/ZIP geocoding — and the "locate
+  me" device fix — is Apple `CLGeocoder`/`CLLocationManager` today, so it's macOS-only and lives
+  entirely in the app layer; the core/FFI stay geocoder-agnostic (they take a coordinate + radius or a
+  ZIP string). A Linux/Windows front-end needs its own: an OS location service, a networked geocoder
+  (e.g. OSM Nominatim — honor its usage policy + a descriptive `User-Agent`), or a **bundled offline
+  ZCTA/county-centroid table** for network-free forward (ZIP→coord) and reverse (coord→nearest
+  ZIP/county). `platypus-rr`'s `getZipcodeInfo` already covers forward-by-ZIP portably; **reverse**
+  (coord→ZIP) is the real gap — the map's pan-to-load depends on it. The same offline centroid table
+  would also unlock the multi-county widening above (see *"Location-first map: widen a networked source
+  beyond one county"*). See the geocoding principle in [`docs/architecture.md`](docs/architecture.md).
+
+- **Extract a shared networked-source cache/transport layer.** The per-account, OS-appropriate on-disk
+  cache + throttle + TTL / refresh / upstream-`lastUpdated` freshness (and atomic writes) currently live
+  in `platypus-rr`. When a second networked provider lands, lift that into a reusable crate so each
+  provider reuses one gentle, well-behaved cache instead of reimplementing it.
 
 - **SQLite store (cross-source merge + refresh).** A persistent store keyed on
   `(source, id, lastUpdated)` to merge a Sentinel base with RR / RepeaterBook deltas and refresh

@@ -58,5 +58,13 @@ typed model — the fork is only at the edges (a parser/codec in, a transport ou
   crates, never in `platypus-core`.
 - **Byte-exact round-trip**: any code that writes to a device round-trips
   (`decode → encode == input`) before it ships; it's the writer safety gate.
+- **Geocoding is a front-end capability, not a core one**: the core and FFI never assume a
+  geocoder — they consume OS-neutral inputs (a coordinate + radius, or a ZIP string). The macOS
+  app resolves place↔coordinate↔ZIP and the "locate me" device fix with Apple
+  `CLGeocoder`/`CLLocationManager`; a Linux or Windows front-end supplies its own (an OS location
+  service, a networked geocoder such as OSM Nominatim under its terms, or a bundled offline
+  ZIP/county-centroid table). One portable seam exists today — `platypus-rr`'s `getZipcodeInfo`
+  resolves a ZIP → coordinate over the API — but reverse (coordinate → ZIP) has no portable path
+  yet (see [`../TODO.md`](../TODO.md)).
 
 See [`../CLAUDE.md`](../CLAUDE.md) for the cold-start brief + doc router.
