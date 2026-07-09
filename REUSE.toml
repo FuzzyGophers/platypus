@@ -22,10 +22,25 @@ path = [
   "assets/**",
   "samples/**",
   "crates/platypus-rr/tests/fixtures/**",
+  "apps/PlatypusMac/Sources/PlatypusMac/Resources/AppIcon.png",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "The Platypus Authors"
 SPDX-License-Identifier = "GPL-2.0-only"
+
+# Third-party data-source brand marks — the services' own logos, reproduced only to identify/credit
+# each source in the UI. Their trademarks, not ours and not GPL (see LICENSES/LicenseRef-Trademark).
+[[annotations]]
+path = ["apps/PlatypusMac/Sources/PlatypusMac/Resources/radioreference.png"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "RadioReference.com LLC"
+SPDX-License-Identifier = "LicenseRef-Trademark"
+
+[[annotations]]
+path = ["apps/PlatypusMac/Sources/PlatypusMac/Resources/repeaterbook.png"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "RepeaterBook.com"
+SPDX-License-Identifier = "LicenseRef-Trademark"
 
 # Bundled pixel fonts for the SDS150 display preview — third-party, OFL-1.1 (redistributable,
 # GPL-compatible as an aggregate). Substitutes for the proprietary on-scanner bitmap font.

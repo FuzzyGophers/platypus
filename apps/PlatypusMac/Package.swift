@@ -22,7 +22,12 @@ let package = Package(
             dependencies: ["CPlatypusFFI"],
             resources: [
                 // Bundled OFL pixel fonts for the pixel-accurate SDS150 display preview.
-                .copy("Resources/Fonts")
+                .copy("Resources/Fonts"),
+                // The app icon (set as the running dock image at launch) + the data-source marks,
+                // all loaded via `Bundle.module` so they work under `swift run` and the bundle alike.
+                .copy("Resources/AppIcon.png"),
+                .copy("Resources/radioreference.png"),
+                .copy("Resources/repeaterbook.png"),
             ],
             linkerSettings: [
                 .unsafeFlags(rustLinkFlags)

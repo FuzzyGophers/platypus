@@ -62,7 +62,10 @@ bundle: _sync-header
     # iconutil), then drop it into the bundle's Resources.
     icns="{{here}}/AppIcon.icns"
     if [ ! -f "$icns" ] && command -v iconutil >/dev/null 2>&1; then
-      src="{{repo}}/assets/icon.jpg"
+      # Use the macOS-shaped master (rounded body + inset + transparent margins) so the icns isn't a
+      # hard square — sips/iconutil preserve its alpha. Falls back to the raw square art if missing.
+      src="{{repo}}/assets/icon-macos.png"
+      [ -f "$src" ] || src="{{repo}}/assets/icon.jpg"
       # iconutil requires the staging dir to end in `.iconset` — anything else is rejected.
       set="{{here}}/AppIcon.iconset"; rm -rf "$set"; mkdir -p "$set"
       for s in 16 32 128 256 512; do s2=$((s * 2))
@@ -74,19 +77,9 @@ bundle: _sync-header
     fi
     [ -f "$icns" ] && cp "$icns" "$app/Contents/Resources/AppIcon.icns"
 
-    # Data-source marks: each service's own icon, used to identify/credit the source. These
-    # are third-party trademarks, so they're NOT committed to this GPL repo — fetch them at
-    # bundle time (best-effort) into Resources/ and package them. UI falls back to a text
-    # badge if a fetch fails. (gitignored: Resources/*.png)
-    mkdir -p "{{here}}/Resources"
-    fetch_mark() { # fetch_mark <name> <url>
-      [ -f "{{here}}/Resources/$1.png" ] && return 0
-      curl -sL --max-time 15 "$2" -o "{{here}}/Resources/$1.png" 2>/dev/null || true
-      file "{{here}}/Resources/$1.png" 2>/dev/null | grep -q 'PNG image' || rm -f "{{here}}/Resources/$1.png"
-    }
-    fetch_mark repeaterbook   "https://www.repeaterbook.com/apple-touch-icon.png"
-    fetch_mark radioreference "https://www.radioreference.com/apple-touch-icon.png"
-    cp "{{here}}/Resources/"*.png "$app/Contents/Resources/" 2>/dev/null || true
+    # Data-source marks (RadioReference / RepeaterBook) + the app icon image are committed SwiftPM
+    # resources in Sources/PlatypusMac/Resources and ride in the copied PlatypusMac_PlatypusMac.bundle
+    # above — nothing to fetch or copy here (they load via Bundle.module).
 
     # Info.plist: copy the committed template, then stamp the version from the single source
     # (workspace Cargo.toml) and validate with Apple's plutil — no XML lives in this recipe.
@@ -95,6 +88,10 @@ bundle: _sync-header
     ver=$(awk -F'"' '/^\[workspace.package\]/{s=1} s&&/^version/{print $2; exit}' "{{repo}}/Cargo.toml")
     plutil -replace CFBundleVersion -string "$ver" "$plist"
     plutil -replace CFBundleShortVersionString -string "$ver" "$plist"
+    # RadioReference app key: stamped from the environment at bundle time so it ships with the app
+    # (it identifies the app to RR) but never lives in git. Absent → the app falls back to the
+    # RR_APP_KEY env var (dev) and, failing that, prompts are disabled with a build-config note.
+    [ -n "${RR_APP_KEY:-}" ] && plutil -replace RRAppKey -string "$RR_APP_KEY" "$plist" || true
     plutil -lint "$plist"
 
     echo "built $app (v$ver)"

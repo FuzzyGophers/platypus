@@ -52,6 +52,40 @@ final class QuitGuard: NSObject {
 /// `NSApplicationDelegate` methods here) — so never try to fetch this instance back off
 /// `NSApp.delegate`; the red-✕ override targets `QuitGuard.shared` instead.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // `swift run` starts a bare binary (no .app bundle), which leaves the process without a
+        // regular activation policy — so it can't take keyboard focus and window managers ignore
+        // it. Promote it to a normal foreground app. No-op for the bundled app (LaunchServices
+        // already sets .regular), so this only helps the `just app::run` dev path.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        // Set the running dock icon from the bundled image — `swift run` has no `.app`/icns, so
+        // without this it shows the generic icon. The source art is a full-bleed square, so shape it
+        // into the macOS icon grid (rounded-rect body inset from the canvas) — otherwise the Dock
+        // shows a hard-edged square unlike every other app. Harmless for the packaged app.
+        if let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+            let art = NSImage(contentsOf: url)
+        {
+            NSApp.applicationIconImage = Self.macOSIcon(from: art)
+        }
+    }
+
+    /// Shape full-bleed square art into a macOS app-icon: a rounded-rect body inset from the canvas
+    /// (~10% margin) with the continuous-corner radius Apple uses (~22.37% of the body). Returns a
+    /// transparent-margin image so the Dock renders it like a native icon.
+    static func macOSIcon(from art: NSImage, canvas: CGFloat = 1024) -> NSImage {
+        let inset = canvas * 0.10
+        let body = NSRect(x: inset, y: inset, width: canvas - 2 * inset, height: canvas - 2 * inset)
+        let radius = body.width * 0.2237
+        let out = NSImage(size: NSSize(width: canvas, height: canvas))
+        out.lockFocus()
+        NSBezierPath(roundedRect: body, xRadius: radius, yRadius: radius).addClip()
+        art.draw(in: body, from: .zero, operation: .sourceOver, fraction: 1.0)
+        out.unlockFocus()
+        return out
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

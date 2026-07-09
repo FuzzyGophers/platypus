@@ -1,0 +1,11 @@
+Third-party trademark / brand mark
+
+The files annotated with this identifier are the logos / brand marks of third
+parties (e.g. RadioReference.com, RepeaterBook.com). They are the property of
+their respective owners and are reproduced here solely to identify and credit
+the data source they represent within the application's UI.
+
+They are NOT licensed under this project's GPL-2.0-only license, are not part of
+Platypus's own copyrighted work, and no endorsement is implied. All trademark
+rights remain with their owners. If an owner objects to this use, the mark will
+be removed; the UI falls back to a plain text badge in its absence.

@@ -36,7 +36,3 @@ __pycache__/
 /apps/PlatypusMac/Platypus.app
 /apps/PlatypusMac/AppIcon.icns
 /apps/PlatypusMac/AppIcon.iconset
-# Third-party data-source marks (their trademarks) — fetched at bundle time, not committed
-# to this GPL repo. `just app::bundle` downloads them if missing; the UI falls back to a
-# text badge when absent.
-/apps/PlatypusMac/Resources/*.png
