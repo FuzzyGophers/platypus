@@ -46,6 +46,10 @@ the app build + a headless `--libtest` smoke. **PRs are expected to be gate-gree
 change the FFI surface, run `just gen-header` and commit the regenerated
 `crates/platypus-ffi/include/platypus.h`. Keep changes small and focused.
 
+To have the gate enforced automatically, run `just install-hooks` once per clone — it points
+git at `.githooks/`, so `just check` runs on every `git commit` (bypass a single commit with
+`git commit --no-verify`).
+
 ## Ground rules
 
 - **Facts-only, GPL-2.0-only.** Platypus is [GPL-2.0-only](LICENSE). From any external

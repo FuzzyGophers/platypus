@@ -20,6 +20,12 @@ swift_header := "apps/PlatypusMac/Sources/CPlatypusFFI/include/platypus.h"
 default:
     @just --list
 
+# One-time per clone: route git's hooks at the version-controlled .githooks/ so every commit
+# runs the full gate (`just check`). Bypass a single commit with `git commit --no-verify`.
+install-hooks:
+    git config core.hooksPath .githooks
+    @echo "hooks armed — pre-commit now runs 'just check'"
+
 # Regenerate the C ABI header from the FFI crate (cbindgen) and sync it into the Swift package.
 # The single source is the Rust signatures; the header is a committed build product.
 gen-header:

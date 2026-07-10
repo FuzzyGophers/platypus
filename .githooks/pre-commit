@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+# SPDX-FileCopyrightText: The Platypus Authors
+#
+# Pre-commit gate: run the full local QA gate (`just check`) so a broken or unformatted change
+# can't be committed. Arm it once per clone with `just install-hooks` (sets core.hooksPath).
+# Bypass for a deliberate WIP checkpoint with `git commit --no-verify`.
+set -euo pipefail
+
+if ! command -v just >/dev/null 2>&1; then
+  echo "pre-commit: 'just' not found — install just (https://just.systems) or commit with --no-verify" >&2
+  exit 1
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+exec just check
