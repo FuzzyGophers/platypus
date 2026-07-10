@@ -111,4 +111,5 @@ account, and nothing is re-served.
 
 See [`CLAUDE.md`](CLAUDE.md) for the cold-start brief + doc router. Detailed references live
 in [`docs/`](docs/) — [architecture](docs/architecture.md), [capabilities](docs/capabilities.md),
-[data sources](docs/sources.md), and the [supported devices](docs/radios/).
+[data sources](docs/sources.md) (and how we [respect them](docs/respecting-sources.md)), and the
+[supported devices](docs/radios/).

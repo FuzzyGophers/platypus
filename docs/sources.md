@@ -108,6 +108,9 @@ The canonical target every source maps onto:
 
 ## Updates & freshness (Sentinel bulk vs RR delta, and the hybrid)
 
+> The etiquette side of this — cache-first, throttled, per-query, facts-only — is summarized in
+> [`respecting-sources.md`](respecting-sources.md).
+
 Radio data goes stale; how each source refreshes differs sharply:
 
 - **Sentinel** = coarse **full-DB replace**. Re-downloads a fresh HPDB snapshot from RR

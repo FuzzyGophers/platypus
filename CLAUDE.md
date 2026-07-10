@@ -24,6 +24,7 @@ detail, and you can begin work without re-deriving the decisions below.
 | [`docs/capabilities.md`](docs/capabilities.md) | **What Platypus can do today, per device** — the living capability list (SDS150, FT-60R, cross-device). |
 | [`TODO.md`](TODO.md) | Tracked future work (providers, store, per-device gaps, serial live control). |
 | [`docs/sources.md`](docs/sources.md) | Data sources (Sentinel files, RadioReference, FCC…), how each maps to the canonical model, RR auth, and the updates/freshness strategy. |
+| [`docs/respecting-sources.md`](docs/respecting-sources.md) | How we stay a good API citizen — cache-first, throttled, per-query, facts-only; the short reader-facing version of the etiquette posture. |
 | [`docs/radios/`](docs/radios/) | **Per-radio docs.** The folder `README.md` indexes supported radios + how to add one; each `<model>.md` is that radio's device reference (file format/codec, favorites dialect, write rules, limits, spec URLs). Today: [`sds150.md`](docs/radios/sds150.md) (+ [`sds150-display.md`](docs/radios/sds150-display.md)) and [`ft60.md`](docs/radios/ft60.md). |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to build/test, the one gate (`just check`), the ground rules (facts-only/GPL, privacy, generic core, round-trip gate), and how to add a radio. |
 | [`samples/README.md`](samples/README.md) | The byte-exact fixtures and the recon/round-trip tools in [`tools/`](tools/). |
