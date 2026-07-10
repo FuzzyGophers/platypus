@@ -13,6 +13,11 @@ on:
 permissions:
   contents: read
 
+# Cancel an in-progress run when a newer commit lands on the same branch / PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust-gate:
     name: Rust engine — gate + license + links + header
@@ -49,8 +54,11 @@ jobs:
           fail: true
 
       # The C ABI header is a cbindgen product; fail if the committed copy is stale.
+      # Prebuilt cbindgen (seconds) instead of `cargo install` (a 1–2 min compile each run).
       - name: install cbindgen
-        run: cargo install cbindgen --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen
       - name: C header is up to date
         run: |
           cbindgen --config crates/platypus-ffi/cbindgen.toml \
