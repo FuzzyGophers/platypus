@@ -23,7 +23,7 @@ jobs:
     name: Rust engine — gate + license + links + header
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Reads the pinned channel + components from rust-toolchain.toml (single source).
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -68,13 +68,20 @@ jobs:
   mac-build:
     name: macOS app — build + smoke
     runs-on: macos-latest
+    env:
+      # macos-latest ships an untrusted `aws/tap`; we install nothing from it. Skip Homebrew's
+      # tap-trust check so brew doesn't emit the notice (the linux job has no such tap).
+      HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Reads the pinned channel from rust-toolchain.toml (single source).
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - uses: extractions/setup-just@v2
+      # Prebuilt `just` (Node 24; no brew, so the runner's untrusted taps stay out of it).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
       # Compile + offline-test the RR `http` transport on its native macOS TLS backend (Secure
       # Transport); the Linux rust-gate already covers the OpenSSL backend via --all-features.
