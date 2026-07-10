@@ -96,12 +96,8 @@ struct CatalogView: View {
     /// The last browse/location error, shown in the location bar.
     @State private var browseError: String?
 
-    // Country → State → County masters (names) — kept for the geographic county picker.
-    @State private var stateNames: [UInt64: String] = [:]
-    @State private var stateAbbr: [UInt64: String] = [:]
-    @State private var stateToCountry: [UInt64: UInt64] = [:]
-    @State private var countyNames: [UInt64: String] = [:]
-    @State private var countyToState: [UInt64: UInt64] = [:]
+    // Country → State → County name masters (`hpdb.cfg`), for the geographic county picker.
+    @State private var masters = Masters()
 
     @State private var libraryDir: String?
     /// A dedicated map data source (an added HPDB folder), independent of the editor `library`
@@ -1105,7 +1101,7 @@ struct CatalogView: View {
                     Image(systemName: "location.fill").font(.system(size: 10)).foregroundStyle(Theme.accent)
                 }.buttonStyle(.plain).help("Near me")
                 // Geographic browse-to-county, when an active source offers a geo hierarchy (HPDB).
-                if browse.capabilities.contains(.geoHierarchy) && !stateNames.isEmpty {
+                if browse.capabilities.contains(.geoHierarchy) && !masters.stateNames.isEmpty {
                     Button { pickerState = nil; showCountyPicker = true } label: {
                         Image(systemName: "list.bullet.indent").font(.system(size: 10)).foregroundStyle(Theme.accent)
                     }
@@ -1140,7 +1136,7 @@ struct CatalogView: View {
                         Image(systemName: "chevron.left").font(.system(size: 10, weight: .bold))
                     }.buttonStyle(.plain)
                 }
-                Text(pickerState.flatMap { stateNames[$0] } ?? "Choose a state")
+                Text(pickerState.flatMap { masters.stateNames[$0] } ?? "Choose a state")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
             }
@@ -1181,13 +1177,13 @@ struct CatalogView: View {
 
     /// States present in the masters, alphabetical.
     private var pickerStates: [(id: UInt64, name: String, abbr: String)] {
-        stateNames.map { (id: $0.key, name: $0.value, abbr: stateAbbr[$0.key] ?? "") }
+        masters.stateNames.map { (id: $0.key, name: $0.value, abbr: masters.stateAbbr[$0.key] ?? "") }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     /// Counties within a state, alphabetical.
     private func pickerCounties(_ state: UInt64) -> [(id: UInt64, name: String)] {
-        countyNames.filter { countyToState[$0.key] == state }
+        masters.countyNames.filter { masters.countyToState[$0.key] == state }
             .map { (id: $0.key, name: $0.value) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -1195,8 +1191,8 @@ struct CatalogView: View {
     /// Resolve a picked county to a browse location (geocode "<County>, <State>") and query there.
     private func selectCounty(_ county: UInt64, state: UInt64) {
         showCountyPicker = false
-        let countyName = countyNames[county] ?? "County"
-        let stateName = stateNames[state] ?? ""
+        let countyName = masters.countyNames[county] ?? "County"
+        let stateName = masters.stateNames[state] ?? ""
         setLocation(query: "\(countyName), \(stateName)")
     }
 
@@ -2302,7 +2298,7 @@ struct CatalogView: View {
                 self.library = lib
                 self.libraryDir = path
                 self.stats = stats
-                self.applyMasters(masters)
+                self.masters = masters
                 // The loaded card/backup becomes the HPDB browse source (enabled), and the browse
                 // aggregator re-queries the current location across it + any other active source.
                 self.dataSources.addHpdb(folderPath: openedFrom)
@@ -2439,13 +2435,6 @@ struct CatalogView: View {
     }
 
     /// Apply the Country→State→County name masters (loaded off-main) to the @State.
-    private func applyMasters(_ m: Masters) {
-        stateNames = m.stateNames
-        stateAbbr = m.stateAbbr
-        stateToCountry = m.stateToCountry
-        countyNames = m.countyNames
-        countyToState = m.countyToState
-    }
 
     private func toggleService(_ code: Int) {
         if filter.services.contains(code) { filter.services.remove(code) } else { filter.services.insert(code) }
@@ -2545,12 +2534,9 @@ struct CatalogView: View {
     private func refreshBrowseCaches() {
         geocoding = true
         browseError = nil
-        DispatchQueue.global(qos: .userInitiated).async {
-            browse.refreshCaches()
-            DispatchQueue.main.async {
-                geocoding = false
-                refresh()
-            }
+        runOffMain { browse.refreshCaches() } then: { _ in
+            geocoding = false
+            refresh()
         }
     }
 
@@ -2718,8 +2704,12 @@ struct CatalogView: View {
     /// Add one channel — but a non-HPDB source on an SD card can't be cherry-picked (favorites are
     /// synthesized whole-system), so route it to the system synthesizer instead.
     private func addChannelOrSystem(_ ch: CatalogChannel, from sys: CatalogSystem) {
-        if activeClass == .sdCard, sys.source != .hpdb {
+        // A networked source (RadioReference) programs the *whole system* through the core
+        // synthesizer — capability-filtered + deduped, per target class. HPDB channels add directly.
+        if sys.source != .hpdb, activeClass == .sdCard {
             synthesizeSystemIntoList(source: sys.source, systemRef: sys.id)
+        } else if sys.source != .hpdb, ft60 != nil {
+            synthesizeSystemIntoFt60(source: sys.source, systemRef: sys.id)
         } else {
             addChannels([ch])
         }
@@ -2729,13 +2719,12 @@ struct CatalogView: View {
     /// (conventional frequencies only, into the active bank tab) or the open SD favorites list.
     private func addChannels(_ chans: [CatalogChannel]) {
         if let ft60 {
-            for ch in chans where !ch.isTalkgroup {
-                guard let hz = ch.freqHz else { continue }
-                ft60.append(
-                    ft60.makeFromCatalog(
-                        name: ch.name, freqHz: hz, mode: ch.mode, tone: ch.tone,
-                        serviceType: ch.serviceType),
-                    toBank: ft60Bank)
+            // Build each channel through the core factory (mode/tone/offset in one place); the core
+            // drops talkgroups / no-frequency channels, so no app-side filter is needed.
+            for ch in chans {
+                if let built = FT60Channel.fromCatalog(ch) {
+                    ft60.append({ _ in built }, toBank: ft60Bank)
+                }
             }
         } else {
             addToSelected(chans.map { $0.id })
@@ -2783,22 +2772,19 @@ struct CatalogView: View {
             selectedSummary = nil
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async {
+        runOffMain {
             let content = existing ?? source.flatMap { Favorites.open(cardMount: $0.mount, slot: $0.slot) }
-            let systems = content?.systems() ?? []
-            let tree = content?.tree() ?? []
-            let summary = content?.summary()
-            DispatchQueue.main.async {
-                guard selectedListId == id else { return }  // selection moved on while loading
-                if existing == nil, let content { contentById[id] = content }
-                // Skip only if an edit swapped this list's content handle while we parsed (its own
-                // refresh already published the newer view). A failed read (content == nil) falls
-                // through and publishes the empty views, clearing the editor as before.
-                if let content, contentById[id] !== content { return }
-                selectedSystems = systems
-                selectedTree = tree
-                selectedSummary = summary
-            }
+            return (content, content?.systems() ?? [], content?.tree() ?? [], content?.summary())
+        } then: { (content, systems, tree, summary) in
+            guard selectedListId == id else { return }  // selection moved on while loading
+            if existing == nil, let content { contentById[id] = content }
+            // Skip only if an edit swapped this list's content handle while we parsed (its own
+            // refresh already published the newer view). A failed read (content == nil) falls
+            // through and publishes the empty views, clearing the editor as before.
+            if let content, contentById[id] !== content { return }
+            selectedSystems = systems
+            selectedTree = tree
+            selectedSummary = summary
         }
     }
 
@@ -2841,30 +2827,47 @@ struct CatalogView: View {
         refreshSelectedView()
     }
 
+    /// Run `work` off the main thread, then hand its result to `then` back on the main thread — the
+    /// common "compute off-main, publish on main" shape the browse/synthesis paths share. (Progress-
+    /// driven or multi-step card ops keep their own explicit dispatch.)
+    private func runOffMain<T>(_ work: @escaping () -> T, then: @escaping (T) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = work()
+            DispatchQueue.main.async { then(result) }
+        }
+    }
+
+    /// Synthesize a browsed system (RadioReference) into the active FT-60's memories — the clone-image
+    /// sibling of `synthesizeSystemIntoList`. The networked synthesis runs off-main; the capability
+    /// filter (analog conventional only), dedupe, and repeater offset all happen in the core.
+    private func synthesizeSystemIntoFt60(source: DataSourceKind, systemRef: String) {
+        guard let ft60 else { return }
+        let agg = browse
+        let bank = ft60Bank
+        runOffMain { agg.ft60Channels(source: source, systemRef: systemRef) } then: { chans in
+            for ch in chans { ft60.append({ _ in ch }, toBank: bank) }
+        }
+    }
+
     /// Synthesize a browsed system (RadioReference) into the open SD-card list — the networked
     /// equivalent of `mutateSelectedContent`, run off-main so the RR fetch never blocks the UI.
     private func synthesizeSystemIntoList(source: DataSourceKind, systemRef: String) {
         guard let id = selectedListId, let cur = contentById[id] else { return }
         let agg = browse
-        DispatchQueue.global(qos: .userInitiated).async {
-            guard let next = agg.appendToFavorites(
-                cur, source: source, systemRef: systemRef, departmentsOn: false)
+        // Parse the derived views off-main too (a statewide trunked system makes `tree()`/`systems()`
+        // non-trivial); only the @State assignment + SwiftUI diff land on main.
+        runOffMain {
+            agg.appendToFavorites(cur, source: source, systemRef: systemRef, departmentsOn: false)
+                .map { ($0, $0.systems(), $0.tree(), $0.summary()) }
+        } then: { bundle in
+            guard let (next, systems, tree, summary) = bundle,
+                selectedListId == id, let i = selectedIndex
             else { return }
-            // Parse the derived views off-main too — a statewide trunked system makes `tree()`/
-            // `systems()` non-trivial, and doing them here (on the freshly-built, exclusively-owned
-            // handle) keeps the finish off the main thread. Only the @State assignment + SwiftUI
-            // diff land on main.
-            let systems = next.systems()
-            let tree = next.tree()
-            let summary = next.summary()
-            DispatchQueue.main.async {
-                guard selectedListId == id, let i = selectedIndex else { return }
-                contentById[id] = next
-                workingLists[i].contentDirty = true
-                selectedSystems = systems
-                selectedTree = tree
-                selectedSummary = summary
-            }
+            contentById[id] = next
+            workingLists[i].contentDirty = true
+            selectedSystems = systems
+            selectedTree = tree
+            selectedSummary = summary
         }
     }
 

@@ -128,6 +128,13 @@ final class BrowseSources: ObservableObject {
         registry[source]?.appendToFavorites(fav, systemRef: systemRef, departmentsOn: departmentsOn)
     }
 
+    /// Synthesize a source's system into FT-60 clone-image memories — routed to the owning source
+    /// (RadioReference synthesizes, capability-filtered + deduped in the core; others return []).
+    /// Networked; call off the main thread.
+    func ft60Channels(source: DataSourceKind, systemRef: String) -> [FT60Channel] {
+        registry[source]?.ft60Channels(systemRef: systemRef) ?? []
+    }
+
     /// A system's categories (nil ⇒ no category level; show channels directly).
     func categories(for system: CatalogSystem, includeAll: Bool) -> [BrowseCategory]? {
         registry[system.source]?.categories(system: system.id, includeAll: includeAll)

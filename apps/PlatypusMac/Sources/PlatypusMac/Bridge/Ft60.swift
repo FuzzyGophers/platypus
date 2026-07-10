@@ -8,10 +8,7 @@ import Foundation
 enum Ft60 {
     /// Candidate serial ports (`/dev/cu.*`).
     static func listPorts() -> [String] {
-        guard let c = platypus_serial_ports_json() else { return [] }
-        defer { platypus_string_free(c) }
-        let data = Data(String(cString: c).utf8)
-        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+        FFI.decode(platypus_serial_ports_json())
     }
 
     struct ReadError: LocalizedError {
@@ -100,11 +97,7 @@ enum Ft60 {
         return (ptr != nil && len > 0) ? Array(UnsafeBufferPointer(start: ptr, count: len)) : []
     }
     private static func decodeChannels(_ handle: OpaquePointer?) -> [FT60Channel] {
-        guard let cjson = platypus_ft60_memories_json(handle) else { return [] }
-        defer { platypus_string_free(cjson) }
-        let data = Data(String(cString: cjson).utf8)
-        let dtos = (try? JSONDecoder().decode([FT60ChannelDTO].self, from: data)) ?? []
-        return dtos.map { $0.channel }
+        FT60Channel.decode(fromJSON: platypus_ft60_memories_json(handle))
     }
     private static func decodePms(_ handle: OpaquePointer?) -> [FT60PmsPair] {
         guard let pjson = platypus_ft60_pms_json(handle) else { return [] }
@@ -337,6 +330,36 @@ private struct FT60ChannelDTO: Codable {
             banks: Set(banks), skip: skip != 0, skipRaw: UInt8(clamping: skip),
             powerCode: power, duplexCode: duplexCode, offsetHz: offsetHz, txHz: txHz,
             stepCode: step, serviceType: nil)
+    }
+}
+
+extension FT60Channel {
+    /// Decode an FT-60 channel JSON array (the shape shared by `platypus_ft60_memories_json` and
+    /// `platypus_ft60_channels_from_rr`), freeing the Rust-owned string.
+    static func decode(fromJSON cjson: UnsafeMutablePointer<CChar>?) -> [FT60Channel] {
+        (FFI.decode(cjson) as [FT60ChannelDTO]).map(\.channel)
+    }
+
+    /// Decode a single FT-60 channel JSON *object* (`platypus_ft60_channel_from_catalog`), freeing the
+    /// Rust string. nil if the pointer is null (e.g. a talkgroup / no-frequency channel).
+    static func decode(oneFromJSON cjson: UnsafeMutablePointer<CChar>?) -> FT60Channel? {
+        (FFI.decodeOne(cjson) as FT60ChannelDTO?)?.channel
+    }
+
+    /// Build an FT-60 memory from a browsed catalog channel through the **core** builder
+    /// (`Ft60Channel::from_program`, mode/tone/offset in one place) — the retirement of the app-side
+    /// `makeFromCatalog`. nil for a talkgroup / no-frequency channel. HPDB carries no TX freq, so
+    /// `inputHz` is 0 (simplex); a future source with a repeater input would pass it here.
+    static func fromCatalog(_ ch: CatalogChannel) -> FT60Channel? {
+        let json = ch.name.withCString { n in
+            withOptionalCString(ch.mode) { m in
+                withOptionalCString(ch.tone) { t in
+                    platypus_ft60_channel_from_catalog(
+                        n, ch.freqHz ?? 0, 0, m, t, Int32(ch.serviceType ?? -1))
+                }
+            }
+        }
+        return decode(oneFromJSON: json)
     }
 }
 

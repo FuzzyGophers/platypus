@@ -171,7 +171,7 @@ final class RadioReferenceSource {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
         }
     }
 
@@ -186,6 +186,14 @@ final class RadioReferenceSource {
         }
     }
 
+    func ft60Channels(systemRef: String) -> [FT60Channel] {
+        queue.sync {
+            systemRef.withCString {
+                FT60Channel.decode(fromJSON: platypus_ft60_channels_from_rr(handle, $0))
+            }
+        }
+    }
+
     /// The location's systems as map pins (drilled systems at their real site, others at the county
     /// centroid). `lat`/`lon`/`miles` are accepted for parity with the library but not used to prune.
     func geo(lat: Double, lon: Double, miles: Double, _ f: FilterState) -> [GeoSystem] {
@@ -197,18 +205,13 @@ final class RadioReferenceSource {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
         }
     }
 
     /// The resolved location (city / ids / centroid / system count / fetchedAt) for the location chip.
     func location() -> RrLocation? {
-        queue.sync {
-            guard let ptr = platypus_rr_source_location_json(handle) else { return nil }
-            defer { platypus_string_free(ptr) }
-            let data = Data(bytes: ptr, count: strlen(ptr))
-            return try? JSONDecoder().decode(RrLocation.self, from: data)
-        }
+        queue.sync { FFI.decodeOne(platypus_rr_source_location_json(handle)) }
     }
 
     /// Warm the next `n` un-warmed trunked systems' real map sites, fetched **concurrently** in Rust
@@ -221,12 +224,7 @@ final class RadioReferenceSource {
     /// Force-refresh the location's base data live (bypassing the cache), returning the updated
     /// location (with a new `fetchedAt`). Networked; run off the main thread.
     func refresh() -> RrLocation? {
-        queue.sync {
-            guard let ptr = platypus_rr_source_refresh(handle) else { return nil }
-            defer { platypus_string_free(ptr) }
-            let data = Data(bytes: ptr, count: strlen(ptr))
-            return try? JSONDecoder().decode(RrLocation.self, from: data)
-        }
+        queue.sync { FFI.decodeOne(platypus_rr_source_refresh(handle)) }
     }
 
     /// A trunked system's talkgroup categories, ranked local-first. `includeAll` reveals the
@@ -236,7 +234,7 @@ final class RadioReferenceSource {
         let ptr = systemRef.withCString {
             platypus_rr_source_categories_json(handle, $0, includeAll ? 1 : 0)
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
         }
     }
 
@@ -251,7 +249,7 @@ final class RadioReferenceSource {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
         }
     }
 
@@ -266,16 +264,10 @@ final class RadioReferenceSource {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
         }
     }
 
-    private static func decode<T: Decodable>(_ ptr: UnsafeMutablePointer<CChar>?) -> [T] {
-        guard let ptr else { return [] }
-        defer { platypus_string_free(ptr) }
-        let data = Data(bytes: ptr, count: strlen(ptr))
-        return (try? JSONDecoder().decode([T].self, from: data)) ?? []
-    }
 }
 
 /// RadioReference as a universal browse source. It answers a location by opening a session for that

@@ -13,7 +13,7 @@ enum AddReadiness: Equatable {
 }
 
 /// Whether a browse **source** can be programmed onto a **target radio class** — the write-path gate:
-/// - clone-image: any source (conventional channels synthesized via `makeFromCatalog`),
+/// - clone-image: any source (conventional channels built by the core `from_program`),
 /// - sd-card: `.hpdb` (selected from the loaded library) or `.radioReference` (favorites synthesized),
 /// - neutral (no radio): nothing.
 func writePath(target: RadioClass?, source: DataSourceKind) -> Bool {

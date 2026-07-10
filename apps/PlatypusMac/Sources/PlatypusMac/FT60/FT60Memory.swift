@@ -19,16 +19,8 @@ enum FTTone: Equatable, Codable {
     case ctcss(Double)  // CTCSS tone frequency in Hz, e.g. 100.0
     case dcs(Int)  // DCS code, e.g. 23
     case cross(ctcss: Double, dcs: Int)  // Tone->DTCS / DTCS->Tone: carries both values
-
-    /// Parse the raw audio-option field our model carries (`TONE=C156.7` / `TONE=D023`).
-    /// Conventional channels only ever carry CTCSS/DCS here (NAC/ColorCode are trunked).
-    static func parse(_ raw: String?) -> FTTone {
-        guard let raw = raw?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return .off }
-        let v = raw.hasPrefix("TONE=") ? String(raw.dropFirst("TONE=".count)) : raw
-        if v.hasPrefix("C"), let f = Double(v.dropFirst()) { return .ctcss(f) }
-        if v.hasPrefix("D"), let c = Int(v.dropFirst()) { return .dcs(c) }
-        return .off
-    }
+    // Parsing a source tone string → tone now lives in the core (`program_tone`); the app only
+    // displays/edits an already-decoded FTTone.
 
     /// Short display, e.g. "CTCSS 100.0 Hz" / "DCS 023" / "CTCSS 100.0 Hz · DCS 023" / "—".
     var display: String {
@@ -176,41 +168,6 @@ final class FT60Memory: ObservableObject {
         if let bank { ch.banks.insert(bank) }
         channels.append(ch)
         return true
-    }
-
-    /// Build an FT-60 channel from a catalog conventional channel (freq/name/mode/tone).
-    func makeFromCatalog(name: String, freqHz: UInt64, mode: String?, tone: String?, serviceType: Int?)
-        -> (Int) -> FT60Channel
-    {
-        { slot in
-            let opts = Ft60Options.shared
-            let t = FTTone.parse(tone)
-            // A catalog tone means squelch (TSQL) for CTCSS, or DTCS for DCS; else no tone —
-            // resolved to the right tone-mode code by label from the core option list.
-            let toneLabel: String
-            switch t {
-            case .off: toneLabel = "Off"
-            case .ctcss: toneLabel = "TSQL"
-            case .dcs: toneLabel = "DTCS"
-            case .cross: toneLabel = "Tone->DTCS"  // catalog tones are never cross; kept exhaustive
-            }
-            // Mode by label (defaults to the first option, FM, if the catalog string is unknown).
-            let modeCode = mode.flatMap { opts.code(opts.modes, label: $0.uppercased()) }
-                ?? opts.modes.first?.code ?? 0
-            return FT60Channel(
-                slot: slot,
-                name: String(name.prefix(self.capacity.nameLen)),
-                freqHz: freqHz,
-                modeCode: modeCode,
-                toneModeCode: opts.code(opts.toneModes, label: toneLabel) ?? 0,
-                tone: t,
-                banks: [],
-                skip: false,
-                powerCode: 0,
-                duplexCode: Ft60Options.duplexSimplex,
-                offsetHz: 0,
-                serviceType: serviceType)
-        }
     }
 
     func toggleBank(slot: Int, bank: Int) {

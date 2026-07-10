@@ -97,6 +97,11 @@ protocol BrowseSource: AnyObject {
     /// Default: nil (this source can't synthesize to an SD card; e.g. HPDB uses the library-append
     /// path). RadioReference implements it. Networked — call off the main thread.
     func appendToFavorites(_ fav: Favorites, systemRef: String, departmentsOn: Bool) -> Favorites?
+
+    /// Synthesize a browsed system into **FT-60 clone-image** memories (analog conventional only —
+    /// capability-filtered + deduped in the core). Default: [] (only RadioReference synthesizes; e.g.
+    /// HPDB uses the direct channel-add path). Networked — call off the main thread.
+    func ft60Channels(systemRef: String) -> [FT60Channel]
 }
 
 extension BrowseSource {
@@ -112,4 +117,5 @@ extension BrowseSource {
     func appendToFavorites(_ fav: Favorites, systemRef: String, departmentsOn: Bool) -> Favorites? {
         nil
     }
+    func ft60Channels(systemRef: String) -> [FT60Channel] { [] }
 }
