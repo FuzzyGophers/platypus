@@ -27,29 +27,20 @@ final class Favorites: Identifiable {
     deinit { platypus_favorites_free(handle) }
 
     func summary() -> FavoritesSummary? {
-        guard let ptr = platypus_favorites_summary_json(handle) else { return nil }
-        defer { platypus_string_free(ptr) }
-        let data = Data(bytes: ptr, count: strlen(ptr))
-        return try? JSONDecoder().decode(FavoritesSummary.self, from: data)
+        FFI.decodeOne(platypus_favorites_summary_json(handle))
     }
 
     /// Write to a mounted card. Returns nil on success, else an error message.
     func commit(cardMount: String, slot: UInt32, label: String) -> String? {
-        let err = cardMount.withCString { m in
+        FFI.takeString(cardMount.withCString { m in
             label.withCString { l in platypus_favorites_commit(handle, m, slot, l) }
-        }
-        guard let err else { return nil }
-        defer { platypus_string_free(err) }
-        return String(cString: err)
+        })
     }
 
     /// Write just this list's slot file (content only — no f_list/app_data). Part of
     /// the batched save; pair with `CardFavorites.applyLayout`. Nil on success.
     func writeSlot(cardMount: String, slot: UInt32) -> String? {
-        guard let err = cardMount.withCString({ platypus_favorites_write_slot(handle, $0, slot) })
-        else { return nil }
-        defer { platypus_string_free(err) }
-        return String(cString: err)
+        FFI.takeString(cardMount.withCString { platypus_favorites_write_slot(handle, $0, slot) })
     }
 
     // MARK: - Editing (Update)
@@ -67,10 +58,7 @@ final class Favorites: Identifiable {
 
     /// The systems + channels in this list (for the edit UI).
     func systems() -> [FavSystem] {
-        guard let ptr = platypus_favorites_channels_json(handle) else { return [] }
-        defer { platypus_string_free(ptr) }
-        let data = Data(bytes: ptr, count: strlen(ptr))
-        return (try? JSONDecoder().decode([FavSystem].self, from: data)) ?? []
+        FFI.decode(platypus_favorites_channels_json(handle))
     }
 
     /// A new handle with the given channels (`"s<si>c<ci>"`) removed.
@@ -86,10 +74,7 @@ final class Favorites: Identifiable {
 
     /// The scan/avoid tree: systems → departments → channels, each with its avoid flag.
     func tree() -> [FavSystemTree] {
-        guard let ptr = platypus_favorites_tree_json(handle) else { return [] }
-        defer { platypus_string_free(ptr) }
-        let data = Data(bytes: ptr, count: strlen(ptr))
-        return (try? JSONDecoder().decode([FavSystemTree].self, from: data)) ?? []
+        FFI.decode(platypus_favorites_tree_json(handle))
     }
 
     /// A new handle with the avoid flag of one record set. `target` is `"s<si>"`

@@ -146,10 +146,7 @@ final class ScannerLibrary {
     deinit { platypus_library_close(handle) }
 
     func stats() -> LibraryStats? {
-        guard let ptr = platypus_library_stats_json(handle) else { return nil }
-        defer { platypus_string_free(ptr) }
-        let data = Data(bytes: ptr, count: strlen(ptr))
-        return try? JSONDecoder().decode(LibraryStats.self, from: data)
+        FFI.decodeOne(platypus_library_stats_json(handle))
     }
 
     /// System-level rows matching the filter.
@@ -161,7 +158,7 @@ final class ScannerLibrary {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
     }
 
     /// Append library channels to an existing favorites list, returning a new handle.
@@ -182,7 +179,7 @@ final class ScannerLibrary {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
     }
 
     /// Build a favorites list from an explicit channel-id selection (the cart).
@@ -204,7 +201,7 @@ final class ScannerLibrary {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
     }
 
     /// The channels of one system whose group is placed in `county` (county-scoped
@@ -218,7 +215,7 @@ final class ScannerLibrary {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
     }
 
     /// The channels of one system whose department geo is within `miles` of
@@ -234,15 +231,9 @@ final class ScannerLibrary {
                 }
             }
         }
-        return Self.decode(ptr)
+        return FFI.decode(ptr)
     }
 
-    private static func decode<T: Decodable>(_ ptr: UnsafeMutablePointer<CChar>?) -> [T] {
-        guard let ptr else { return [] }
-        defer { platypus_string_free(ptr) }
-        let data = Data(bytes: ptr, count: strlen(ptr))
-        return (try? JSONDecoder().decode([T].self, from: data)) ?? []
-    }
 }
 
 extension CatalogSystem {

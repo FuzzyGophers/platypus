@@ -32,9 +32,6 @@ enum Radios {
 
     /// Every radio the core registry knows, in registration order.
     static func list() -> [Info] {
-        guard let c = platypus_radios_json() else { return [] }
-        defer { platypus_string_free(c) }
-        let data = Data(String(cString: c).utf8)
-        return (try? JSONDecoder().decode([Info].self, from: data)) ?? []
+        FFI.decode(platypus_radios_json())
     }
 }

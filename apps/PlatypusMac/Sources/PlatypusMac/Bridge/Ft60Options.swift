@@ -43,10 +43,7 @@ final class Ft60Options {
     }
 
     private static func load() -> Payload? {
-        guard let c = platypus_ft60_options_json() else { return nil }
-        defer { platypus_string_free(c) }
-        let data = Data(String(cString: c).utf8)
-        return try? JSONDecoder().decode(Payload.self, from: data)
+        FFI.decodeOne(platypus_ft60_options_json())
     }
 
     // MARK: - Lookups (used by the row/detail displays and the form)

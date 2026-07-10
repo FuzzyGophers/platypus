@@ -65,26 +65,16 @@ final class Hpdb {
     /// Stateless: the county master lives in its own `hpdb.cfg`.
     static func counties(hpdbCfgPath: String) -> [County] {
         let ptr = hpdbCfgPath.withCString { platypus_counties_json($0) }
-        return decode(ptr)
+        return FFI.decode(ptr)
     }
 
     /// Stateless: the state master (Country → State) from `hpdb.cfg`.
     static func states(hpdbCfgPath: String) -> [StateInfo] {
         let ptr = hpdbCfgPath.withCString { platypus_states_json($0) }
-        return decode(ptr)
+        return FFI.decode(ptr)
     }
-
-    // MARK: - JSON bridging
 
     private func decodeSystems(_ ptr: UnsafeMutablePointer<CChar>?) -> [ScannerSystem] {
-        Hpdb.decode(ptr)
-    }
-
-    /// Take ownership of a Rust-owned JSON C string, decode it, and free it.
-    private static func decode<T: Decodable>(_ ptr: UnsafeMutablePointer<CChar>?) -> [T] {
-        guard let ptr else { return [] }
-        defer { platypus_string_free(ptr) }
-        let data = Data(bytes: ptr, count: strlen(ptr))
-        return (try? JSONDecoder().decode([T].self, from: data)) ?? []
+        FFI.decode(ptr)
     }
 }

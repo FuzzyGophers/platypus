@@ -48,9 +48,7 @@ enum DisplayBridge {
     /// Read the display config from a mounted card (its volume root). Nil if no supported card /
     /// no `profile.cfg` is there.
     static func read(cardMount: String) -> DisplayConfigData? {
-        guard let c = cardMount.withCString({ platypus_display_config_json($0) }) else { return nil }
-        defer { platypus_string_free(c) }
-        return try? JSONDecoder().decode(DisplayConfigData.self, from: Data(String(cString: c).utf8))
+        FFI.decodeOne(cardMount.withCString { platypus_display_config_json($0) })
     }
 
     /// Apply an edit script (see `platypus_display_apply`) and commit. Returns nil on success, or
@@ -101,16 +99,10 @@ final class DisplayOptions {
     let colorGroups: [DisplayColorGroupInfo]
 
     private init() {
-        palette = DisplayOptions.decode(platypus_display_palette_json()) ?? []
-        areas = DisplayOptions.decode(platypus_display_items_json()) ?? []
-        modes = DisplayOptions.decode(platypus_display_modes_json()) ?? []
-        colorGroups = DisplayOptions.decode(platypus_display_color_groups_json()) ?? []
-    }
-
-    private static func decode<T: Decodable>(_ c: UnsafeMutablePointer<CChar>?) -> T? {
-        guard let c else { return nil }
-        defer { platypus_string_free(c) }
-        return try? JSONDecoder().decode(T.self, from: Data(String(cString: c).utf8))
+        palette = FFI.decode(platypus_display_palette_json())
+        areas = FFI.decode(platypus_display_items_json())
+        modes = FFI.decode(platypus_display_modes_json())
+        colorGroups = FFI.decode(platypus_display_color_groups_json())
     }
 
     func tokens(forArea dispOptId: Int) -> [String] {
