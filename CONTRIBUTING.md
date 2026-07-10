@@ -64,6 +64,9 @@ git at `.githooks/`, so `just check` runs on every `git commit` (bypass a single
   UI-composed from generic primitives; models are detected via the profile registry.
 - **Byte-exact round-trip is the writer safety gate.** Any code that writes to a device
   must round-trip (`decode → encode == input`) before it ships.
+- **Signed commits + tags.** Every commit and release tag is GPG-signed. Configure it once per
+  clone: `git config commit.gpgsign true` and `git config tag.gpgsign true` (and add your key to
+  GitHub). Unsigned commits won't be merged — the `master` branch requires signed commits.
 
 ## Adding a radio
 
