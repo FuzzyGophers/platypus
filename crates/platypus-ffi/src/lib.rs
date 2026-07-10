@@ -2903,6 +2903,81 @@ pub unsafe extern "C" fn platypus_ft60_backup(
     })
 }
 
+/// Serialize one FT-60 channel to the JSON object the editor consumes (shape documented on
+/// [`platypus_ft60_memories_json`]). Shared by the memory read and the RR-synthesis emitter so both
+/// stay in lockstep.
+fn ft60_channel_json(out: &mut String, ch: &platypus_core::device::ft60::Ft60Channel) {
+    use platypus_core::device::ft60::{Tone, MODES, TMODES};
+    out.push_str("{\"slot\":");
+    out.push_str(&ch.slot.to_string());
+    out.push_str(",\"name\":");
+    push_json_string(out, &ch.name);
+    out.push_str(",\"freqHz\":");
+    out.push_str(&ch.rx_hz.to_string());
+    out.push_str(",\"modeCode\":");
+    out.push_str(
+        &MODES
+            .iter()
+            .position(|m| *m == ch.mode)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    // `toneValue2` carries the DCS half of a cross mode (CTCSS in `toneValue`); 0 otherwise.
+    let (tmode, tval, tval2) = match ch.tone {
+        Tone::None => ("off", 0i64, 0i64),
+        Tone::Ctcss(hz10) => ("ctcss", hz10 as i64, 0),
+        Tone::Dcs(code) => ("dcs", code as i64, 0),
+        Tone::Cross { ctcss, dcs } => ("cross", ctcss as i64, dcs as i64),
+    };
+    out.push_str(",\"toneModeCode\":");
+    out.push_str(
+        &TMODES
+            .iter()
+            .position(|m| *m == ch.tone_mode)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    out.push_str(",\"toneMode\":");
+    push_json_string(out, tmode);
+    out.push_str(",\"toneValue\":");
+    out.push_str(&tval.to_string());
+    out.push_str(",\"toneValue2\":");
+    out.push_str(&tval2.to_string());
+    // Duplex as the writer's code (0 simplex, 2 −, 3 +, 4 split); other states collapse to simplex.
+    let duplex_code = match ch.duplex {
+        "-" => 2,
+        "+" => 3,
+        "split" => 4,
+        _ => 0,
+    };
+    out.push_str(",\"duplexCode\":");
+    out.push_str(&duplex_code.to_string());
+    out.push_str(",\"offsetHz\":");
+    out.push_str(&ch.offset_hz.to_string());
+    out.push_str(",\"txHz\":");
+    out.push_str(&ch.tx_hz.to_string());
+    out.push_str(",\"power\":");
+    out.push_str(&ch.power.to_string());
+    out.push_str(",\"step\":");
+    out.push_str(&ch.step.to_string());
+    // skip as a code so the tri-state (""/S/P) survives the round-trip: 0 / 1 / 2.
+    let skip_code = match ch.skip {
+        "S" => 1,
+        "P" => 2,
+        _ => 0,
+    };
+    out.push_str(",\"skip\":");
+    out.push_str(&skip_code.to_string());
+    out.push_str(",\"banks\":[");
+    for (j, b) in ch.banks.iter().enumerate() {
+        if j > 0 {
+            out.push(',');
+        }
+        out.push_str(&b.to_string());
+    }
+    out.push_str("]}");
+}
+
 /// The decoded standard memories as a JSON array — the shape the FT-60 editor consumes.
 /// Every enumerated field crosses as its on-radio **code** (symmetric with the write struct
 /// `PlatypusFt60Channel`), so the app never string-matches an attribute: `[{ slot, name,
@@ -2917,7 +2992,6 @@ pub unsafe extern "C" fn platypus_ft60_backup(
 #[no_mangle]
 pub unsafe extern "C" fn platypus_ft60_memories_json(handle: *const PlatypusFt60) -> *mut c_char {
     ffi_guard(ptr::null_mut(), move || unsafe {
-        use platypus_core::device::ft60::{Tone, MODES, TMODES};
         let Some(h) = handle.as_ref() else {
             return ptr::null_mut();
         };
@@ -2926,80 +3000,88 @@ pub unsafe extern "C" fn platypus_ft60_memories_json(handle: *const PlatypusFt60
             if i > 0 {
                 out.push(',');
             }
-            out.push_str("{\"slot\":");
-            out.push_str(&ch.slot.to_string());
-            out.push_str(",\"name\":");
-            push_json_string(&mut out, &ch.name);
-            out.push_str(",\"freqHz\":");
-            out.push_str(&ch.rx_hz.to_string());
-            // Mode as its MODES index (0=FM/1=NFM/2=AM).
-            out.push_str(",\"modeCode\":");
-            out.push_str(
-                &MODES
-                    .iter()
-                    .position(|m| *m == ch.mode)
-                    .unwrap_or(0)
-                    .to_string(),
-            );
-            // `toneValue2` carries the DCS half of a cross mode (CTCSS in `toneValue`); 0 otherwise.
-            let (tmode, tval, tval2) = match ch.tone {
-                Tone::None => ("off", 0i64, 0i64),
-                Tone::Ctcss(hz10) => ("ctcss", hz10 as i64, 0),
-                Tone::Dcs(code) => ("dcs", code as i64, 0),
-                Tone::Cross { ctcss, dcs } => ("cross", ctcss as i64, dcs as i64),
-            };
-            // Tone-mode sub-kind as its TMODES index, plus the value-kind + value(s) for the squelch.
-            out.push_str(",\"toneModeCode\":");
-            out.push_str(
-                &TMODES
-                    .iter()
-                    .position(|m| *m == ch.tone_mode)
-                    .unwrap_or(0)
-                    .to_string(),
-            );
-            out.push_str(",\"toneMode\":");
-            push_json_string(&mut out, tmode);
-            out.push_str(",\"toneValue\":");
-            out.push_str(&tval.to_string());
-            out.push_str(",\"toneValue2\":");
-            out.push_str(&tval2.to_string());
-            // Duplex as the writer's code (0 simplex, 2 −, 3 +, 4 split); other states collapse to
-            // simplex, matching the form's option set.
-            let duplex_code = match ch.duplex {
-                "-" => 2,
-                "+" => 3,
-                "split" => 4,
-                _ => 0,
-            };
-            out.push_str(",\"duplexCode\":");
-            out.push_str(&duplex_code.to_string());
-            out.push_str(",\"offsetHz\":");
-            out.push_str(&ch.offset_hz.to_string());
-            out.push_str(",\"txHz\":");
-            out.push_str(&ch.tx_hz.to_string());
-            out.push_str(",\"power\":");
-            out.push_str(&ch.power.to_string());
-            out.push_str(",\"step\":");
-            out.push_str(&ch.step.to_string());
-            // skip as a code so the tri-state (""/S/P) survives the round-trip: 0 / 1 / 2.
-            let skip_code = match ch.skip {
-                "S" => 1,
-                "P" => 2,
-                _ => 0,
-            };
-            out.push_str(",\"skip\":");
-            out.push_str(&skip_code.to_string());
-            out.push_str(",\"banks\":[");
-            for (j, b) in ch.banks.iter().enumerate() {
-                if j > 0 {
-                    out.push(',');
-                }
-                out.push_str(&b.to_string());
-            }
-            out.push_str("]}");
+            ft60_channel_json(&mut out, ch);
         }
         out.push(']');
         to_c_string(out)
+    })
+}
+
+/// Synthesize FT-60 memories from a browsed **RadioReference** system (`t<sid>`/`c<scid>`), returning
+/// the channel JSON array (same shape as [`platypus_ft60_memories_json`]) — the clone-image sibling of
+/// [`platypus_favorites_append_from_rr`]. Applies the FT-60's capability restrictions (analog
+/// conventional only — trunked systems + digital channels drop out) and dedupe. The app appends the
+/// result to its working memory. Networked (fetches the system); `[]` on bad input or a failed fetch.
+///
+/// # Safety
+/// `rr` valid or null; `system_ref` a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn platypus_ft60_channels_from_rr(
+    rr: *const rr::PlatypusRrSource,
+    system_ref: *const c_char,
+) -> *mut c_char {
+    ffi_guard(ptr::null_mut(), move || unsafe {
+        use platypus_core::device::{ft60, RadioProfile};
+        let Some(src) = rr.as_ref() else {
+            return ptr::null_mut();
+        };
+        let Some(sref) = cstr_to_str(system_ref) else {
+            return ptr::null_mut();
+        };
+        let Some(sys) = rr::rr_system_for(src, sref) else {
+            return ptr::null_mut();
+        };
+        let program = platypus_core::synthesize::ProgramSystem::from(&sys);
+        let support = ft60::Ft60::new().program_support();
+        let channels = ft60::synthesize_ft60(&[program], &support, 0);
+        let mut out = String::from("[");
+        for (i, ch) in channels.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            ft60_channel_json(&mut out, ch);
+        }
+        out.push(']');
+        to_c_string(out)
+    })
+}
+
+/// Build one FT-60 memory from loose catalog fields (an HPDB or other non-RR channel) through the
+/// same core `Ft60Channel::from_program` the RR path uses — this retires the app-side `makeFromCatalog`
+/// so every source funnels through one channel factory. Returns the channel JSON *object* (shape as one
+/// element of [`platypus_ft60_memories_json`]), or null if it has no RX frequency (e.g. a talkgroup).
+/// `freq_hz`/`input_hz` 0 = absent (0 input = simplex); `service_type` < 0 = none; `mode`/`tone` may be
+/// null. In-memory (no network).
+///
+/// # Safety
+/// `name` a valid NUL-terminated C string; `mode`/`tone` valid or null.
+#[no_mangle]
+pub unsafe extern "C" fn platypus_ft60_channel_from_catalog(
+    name: *const c_char,
+    freq_hz: u64,
+    input_hz: u64,
+    mode: *const c_char,
+    tone: *const c_char,
+    service_type: i32,
+) -> *mut c_char {
+    ffi_guard(ptr::null_mut(), move || unsafe {
+        let ch = platypus_core::synthesize::ProgramChannel {
+            name: cstr_to_str(name).unwrap_or("").to_string(),
+            freq_hz: (freq_hz != 0).then_some(freq_hz),
+            input_hz: (input_hz != 0).then_some(input_hz),
+            tgid: None,
+            mode: cstr_to_str(mode).map(str::to_string),
+            tone: cstr_to_str(tone).map(str::to_string),
+            service_type: (service_type >= 0).then_some(service_type as u16),
+        };
+        match platypus_core::device::ft60::Ft60Channel::from_program(&ch, 0) {
+            Some(c) => {
+                let mut out = String::new();
+                ft60_channel_json(&mut out, &c);
+                to_c_string(out)
+            }
+            None => ptr::null_mut(),
+        }
     })
 }
 

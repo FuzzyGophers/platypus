@@ -739,6 +739,37 @@ char *platypus_ft60_backup(const PlatypusFt60 *handle,
 char *platypus_ft60_memories_json(const PlatypusFt60 *handle);
 
 /*
+ Synthesize FT-60 memories from a browsed **RadioReference** system (`t<sid>`/`c<scid>`), returning
+ the channel JSON array (same shape as [`platypus_ft60_memories_json`]) — the clone-image sibling of
+ [`platypus_favorites_append_from_rr`]. Applies the FT-60's capability restrictions (analog
+ conventional only — trunked systems + digital channels drop out) and dedupe. The app appends the
+ result to its working memory. Networked (fetches the system); `[]` on bad input or a failed fetch.
+
+ # Safety
+ `rr` valid or null; `system_ref` a valid NUL-terminated C string.
+ */
+char *platypus_ft60_channels_from_rr(const PlatypusRrSource *rr,
+                                     const char *system_ref);
+
+/*
+ Build one FT-60 memory from loose catalog fields (an HPDB or other non-RR channel) through the
+ same core `Ft60Channel::from_program` the RR path uses — this retires the app-side `makeFromCatalog`
+ so every source funnels through one channel factory. Returns the channel JSON *object* (shape as one
+ element of [`platypus_ft60_memories_json`]), or null if it has no RX frequency (e.g. a talkgroup).
+ `freq_hz`/`input_hz` 0 = absent (0 input = simplex); `service_type` < 0 = none; `mode`/`tone` may be
+ null. In-memory (no network).
+
+ # Safety
+ `name` a valid NUL-terminated C string; `mode`/`tone` valid or null.
+ */
+char *platypus_ft60_channel_from_catalog(const char *name,
+                                         uint64_t freq_hz,
+                                         uint64_t input_hz,
+                                         const char *mode,
+                                         const char *tone,
+                                         int32_t service_type);
+
+/*
  Free an FT-60 image handle.
 
  # Safety
