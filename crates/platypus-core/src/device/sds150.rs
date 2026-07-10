@@ -8,8 +8,8 @@
 //! and schema from that model's own card, and register it.
 
 use super::profile::{
-    ChannelColumns, GeoColumns, ModelKey, RadioClass, RadioProfile, RecordSchema, ScannerLimits,
-    SdCardProfile, SdLayout,
+    ChannelColumns, GeoColumns, ModelKey, ProgramSupport, RadioClass, RadioProfile, RecordSchema,
+    ScannerLimits, SdCardProfile, SdLayout,
 };
 
 /// SD-card layout for the SDS150. `discovery_cfg` intentionally holds the
@@ -118,6 +118,11 @@ impl RadioProfile for Sds150 {
 
     fn class(&self) -> RadioClass {
         RadioClass::SdCardScanner
+    }
+
+    fn program_support(&self) -> ProgramSupport {
+        // A database scanner: receives/stores trunked + conventional across every modulation.
+        ProgramSupport::all()
     }
 
     fn as_sd_card(&self) -> Option<&dyn SdCardProfile> {

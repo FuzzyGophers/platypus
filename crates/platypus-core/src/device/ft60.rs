@@ -18,8 +18,8 @@
 //! GPL-2.0-only. See `CREDITS.md`.
 
 use super::profile::{
-    CloneCapacity, CloneFieldOptions, CloneImageProfile, FieldOption, RadioClass, RadioProfile,
-    ToneValueKind,
+    CloneCapacity, CloneFieldOptions, CloneImageProfile, FieldOption, ProgramSupport, RadioClass,
+    RadioProfile, ToneValueKind,
 };
 
 /// The FT-60R as a registered radio profile (clone-image class). Its transport spec +
@@ -54,6 +54,11 @@ impl RadioProfile for Ft60 {
 
     fn class(&self) -> RadioClass {
         RadioClass::CloneImage
+    }
+
+    fn program_support(&self) -> ProgramSupport {
+        // An analog FM/NFM/AM handheld: conventional memories only — no trunking, no digital.
+        ProgramSupport::analog_conventional()
     }
 
     fn as_clone_image(&self) -> Option<&dyn CloneImageProfile> {

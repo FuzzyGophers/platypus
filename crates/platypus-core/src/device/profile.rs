@@ -260,6 +260,192 @@ pub enum RadioClass {
     CloneImage,
 }
 
+/// A signal's modulation family — the coarse "can this radio even demodulate it?" axis: analog
+/// voice (FM/NFM/AM) vs the digital voice modes. Classified from a system's technology tag and/or a
+/// channel's mode; the set a radio can store lives in [`ProgramSupport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modulation {
+    /// Analog voice — FM / NFM / AM.
+    Analog,
+    P25,
+    Dmr,
+    Nxdn,
+    DStar,
+    /// Yaesu System Fusion (C4FM).
+    Fusion,
+    /// EDACS ProVoice.
+    ProVoice,
+    /// A digital mode we don't classify specifically — still digital, still not analog.
+    OtherDigital,
+}
+
+impl Modulation {
+    /// Every modulation, in order — for a receiver that takes them all, and for legend rendering.
+    pub const ALL: [Modulation; 8] = [
+        Modulation::Analog,
+        Modulation::P25,
+        Modulation::Dmr,
+        Modulation::Nxdn,
+        Modulation::DStar,
+        Modulation::Fusion,
+        Modulation::ProVoice,
+        Modulation::OtherDigital,
+    ];
+
+    /// Classify a system technology tag (`P25Standard`, `MotoTrbo`, …) and/or a channel mode
+    /// (`FM`, `NFM`, `AM`, `DIGITAL`, …) into a modulation family. Recognized digital markers win;
+    /// anything else (including unknown/absent) is treated as analog — the conventional-analog
+    /// common case. The `tech` tag is the more specific signal, so it's consulted first.
+    pub fn classify(tech: Option<&str>, mode: Option<&str>) -> Modulation {
+        for hint in [tech, mode].into_iter().flatten() {
+            if let Some(m) = Modulation::from_hint(hint) {
+                return m;
+            }
+        }
+        Modulation::Analog
+    }
+
+    /// Map one tech/mode string to a modulation, or `None` if it carries no recognizable marker.
+    fn from_hint(s: &str) -> Option<Modulation> {
+        let upper = s.to_ascii_uppercase();
+        let u = upper.trim();
+        if matches!(u, "FM" | "NFM" | "FMN" | "AM" | "NAM" | "WFM" | "ANALOG") {
+            return Some(Modulation::Analog);
+        }
+        if u.contains("P25") || u.contains("PROJECT 25") || u.contains("APCO") {
+            return Some(Modulation::P25);
+        }
+        if u.contains("DMR") || u.contains("TRBO") || u.contains("HYTERA") {
+            return Some(Modulation::Dmr);
+        }
+        if u.contains("NXDN") || u.contains("NEXEDGE") || u.contains("IDAS") {
+            return Some(Modulation::Nxdn);
+        }
+        if u.contains("D-STAR") || u.contains("DSTAR") || u.contains("D STAR") {
+            return Some(Modulation::DStar);
+        }
+        if u.contains("FUSION") || u.contains("C4FM") || u.contains("YSF") {
+            return Some(Modulation::Fusion);
+        }
+        if u.contains("PROVOICE") || u.contains("PRO-VOICE") {
+            return Some(Modulation::ProVoice);
+        }
+        if u.contains("DIGITAL") {
+            return Some(Modulation::OtherDigital);
+        }
+        None
+    }
+
+    /// Whether this is the analog-voice family.
+    pub fn is_analog(self) -> bool {
+        matches!(self, Modulation::Analog)
+    }
+
+    /// Short human label — for a "… not supported" badge and the capability legend.
+    pub fn label(self) -> &'static str {
+        match self {
+            Modulation::Analog => "analog",
+            Modulation::P25 => "P25",
+            Modulation::Dmr => "DMR",
+            Modulation::Nxdn => "NXDN",
+            Modulation::DStar => "D-STAR",
+            Modulation::Fusion => "Fusion",
+            Modulation::ProVoice => "ProVoice",
+            Modulation::OtherDigital => "digital",
+        }
+    }
+
+    /// This modulation's bit in a [`ProgramSupport`] set.
+    fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
+}
+
+/// What a radio can be **programmed with** — the axis that decides which browsed systems/channels
+/// have a home on it. A location-first browse tests each item against the active target's support
+/// and de-emphasizes (not hides) the ones it can't take, with the reason. A per-profile fact
+/// (see [`RadioProfile::program_support`]), so adding a radio declares its own support here — no
+/// front-end hard-coding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramSupport {
+    /// Stores trunked-system talkgroups (a trunk-tracking scanner) vs conventional memories only.
+    pub trunking: bool,
+    /// Bitset of the [`Modulation`]s this radio can receive/store.
+    modulations: u16,
+}
+
+impl ProgramSupport {
+    /// Build from a trunking flag and the supported modulations.
+    pub fn new(trunking: bool, modulations: &[Modulation]) -> Self {
+        let mut bits = 0u16;
+        let mut i = 0;
+        while i < modulations.len() {
+            bits |= modulations[i].bit();
+            i += 1;
+        }
+        Self {
+            trunking,
+            modulations: bits,
+        }
+    }
+
+    /// A receiver that takes everything — trunking + every modulation (e.g. a database scanner).
+    pub fn all() -> Self {
+        Self::new(true, &Modulation::ALL)
+    }
+
+    /// Analog-only conventional memories — no trunking, no digital (e.g. an analog FM handheld).
+    pub fn analog_conventional() -> Self {
+        Self::new(false, &[Modulation::Analog])
+    }
+
+    /// Whether this radio supports the given modulation.
+    pub fn supports(&self, m: Modulation) -> bool {
+        self.modulations & m.bit() != 0
+    }
+
+    /// The supported modulations, in canonical order — for a UI legend.
+    pub fn modulations(&self) -> impl Iterator<Item = Modulation> + '_ {
+        Modulation::ALL.into_iter().filter(|m| self.supports(*m))
+    }
+
+    /// Whether a browsed item — a system that may be trunked, carrying a `tech` tag and/or a
+    /// channel `mode` — can be programmed onto this radio, and if not, why.
+    pub fn compatibility(
+        &self,
+        is_trunked: bool,
+        tech: Option<&str>,
+        mode: Option<&str>,
+    ) -> Compatibility {
+        if is_trunked && !self.trunking {
+            return Compatibility::NoTrunking;
+        }
+        let m = Modulation::classify(tech, mode);
+        if !self.supports(m) {
+            return Compatibility::NoModulation(m);
+        }
+        Compatibility::Ok
+    }
+}
+
+/// The verdict from [`ProgramSupport::compatibility`] — whether a browsed item fits the target radio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compatibility {
+    /// The item can be programmed onto this radio.
+    Ok,
+    /// The item is trunked but the radio stores conventional memories only.
+    NoTrunking,
+    /// The item's modulation isn't supported (carries which, for the reason shown).
+    NoModulation(Modulation),
+}
+
+impl Compatibility {
+    /// Whether the item is programmable (no incompatibility).
+    pub fn is_ok(self) -> bool {
+        matches!(self, Compatibility::Ok)
+    }
+}
+
 /// The small cross-cutting base every radio shares, regardless of how it's
 /// programmed: its identity and class. Format-specific contracts (SD-card layout,
 /// serial protocol, …) live in sub-traits like [`SdCardProfile`]. This is the seam
@@ -281,6 +467,10 @@ pub trait RadioProfile: Send + Sync {
 
     /// Which class of radio this is (drives which sub-trait/backend applies).
     fn class(&self) -> RadioClass;
+
+    /// What this radio can be **programmed with** — trunking + the supported modulations. Drives the
+    /// capability-aware browse (which browsed systems/channels have a home on the active target).
+    fn program_support(&self) -> ProgramSupport;
 
     /// The SD-card contract, if this is an SD-card scanner (else `None`). Lets the
     /// registry hold every radio as `dyn RadioProfile` and recover the class trait.
@@ -528,5 +718,81 @@ impl ProfileRegistry {
 impl Default for ProfileRegistry {
     fn default() -> Self {
         Self::with_builtins()
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn analog_handheld_rejects_trunk_and_digital() {
+        let s = ProgramSupport::analog_conventional();
+        assert!(!s.trunking);
+        // Analog conventional has a home.
+        assert!(s.compatibility(false, Some("FM"), Some("FM")).is_ok());
+        assert!(s.compatibility(false, Some("FMN"), Some("NFM")).is_ok());
+        assert!(s.compatibility(false, None, None).is_ok()); // unknown → analog
+                                                             // A trunked system does not (regardless of its tech).
+        assert_eq!(
+            s.compatibility(true, Some("P25Standard"), None),
+            Compatibility::NoTrunking
+        );
+        // Digital *conventional* is rejected on modulation, carrying which.
+        assert_eq!(
+            s.compatibility(false, Some("MotoTRBO"), None),
+            Compatibility::NoModulation(Modulation::Dmr)
+        );
+        assert_eq!(
+            s.compatibility(false, None, Some("P25")),
+            Compatibility::NoModulation(Modulation::P25)
+        );
+    }
+
+    #[test]
+    fn database_scanner_takes_everything() {
+        let s = ProgramSupport::all();
+        assert!(s.trunking);
+        assert!(s.compatibility(true, Some("P25Standard"), None).is_ok());
+        assert!(s.compatibility(false, Some("DMR"), None).is_ok());
+        assert!(s.compatibility(false, Some("FM"), Some("NFM")).is_ok());
+        for m in Modulation::ALL {
+            assert!(s.supports(m));
+        }
+    }
+
+    #[test]
+    fn classify_prefers_tech_then_mode() {
+        assert_eq!(
+            Modulation::classify(Some("P25Standard"), None),
+            Modulation::P25
+        );
+        assert_eq!(
+            Modulation::classify(Some("MotoTrbo"), None),
+            Modulation::Dmr
+        );
+        assert_eq!(Modulation::classify(Some("NXDN48"), None), Modulation::Nxdn);
+        assert_eq!(Modulation::classify(None, Some("FM")), Modulation::Analog);
+        assert_eq!(Modulation::classify(None, Some("NFM")), Modulation::Analog);
+        assert_eq!(Modulation::classify(None, None), Modulation::Analog);
+        // A non-modulation tech tag falls through to the (analog) mode.
+        assert_eq!(
+            Modulation::classify(Some("Conventional"), Some("FM")),
+            Modulation::Analog
+        );
+    }
+
+    #[test]
+    fn legend_lists_only_supported_modulations() {
+        assert_eq!(
+            ProgramSupport::analog_conventional()
+                .modulations()
+                .collect::<Vec<_>>(),
+            vec![Modulation::Analog]
+        );
+        assert_eq!(
+            ProgramSupport::all().modulations().count(),
+            Modulation::ALL.len()
+        );
     }
 }

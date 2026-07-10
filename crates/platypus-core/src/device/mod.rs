@@ -22,8 +22,8 @@ pub mod sds150;
 
 pub use ft60::{CloneSpec, Ft60};
 pub use profile::{
-    ChannelColumns, CloneCapacity, CloneFieldOptions, CloneImageProfile, FavoritesDialect,
-    FieldOption, GeoColumns, ModelKey, ProfileRegistry, RadioClass, RadioProfile, RecordSchema,
-    SdCardProfile, SdLayout, ToneValueKind,
+    ChannelColumns, CloneCapacity, CloneFieldOptions, CloneImageProfile, Compatibility,
+    FavoritesDialect, FieldOption, GeoColumns, ModelKey, Modulation, ProfileRegistry,
+    ProgramSupport, RadioClass, RadioProfile, RecordSchema, SdCardProfile, SdLayout, ToneValueKind,
 };
 pub use sds150::Sds150;
