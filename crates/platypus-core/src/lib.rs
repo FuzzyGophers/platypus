@@ -51,5 +51,6 @@ pub mod model;
 pub mod provider;
 pub mod rr;
 pub mod serial;
+pub mod synthesize;
 
 pub use error::{Error, Result};
