@@ -119,6 +119,15 @@ final class BrowseSources: ObservableObject {
             .map { var c = $0; c.source = system.source; return c }
     }
 
+    /// Program a source's system (by ref) onto an SD-card favorites list by synthesizing records —
+    /// routed to the owning source (RadioReference synthesizes; others return nil). Networked; call
+    /// off the main thread.
+    func appendToFavorites(_ fav: Favorites, source: DataSourceKind, systemRef: String,
+                           departmentsOn: Bool) -> Favorites?
+    {
+        registry[source]?.appendToFavorites(fav, systemRef: systemRef, departmentsOn: departmentsOn)
+    }
+
     /// A system's categories (nil ⇒ no category level; show channels directly).
     func categories(for system: CatalogSystem, includeAll: Bool) -> [BrowseCategory]? {
         registry[system.source]?.categories(system: system.id, includeAll: includeAll)

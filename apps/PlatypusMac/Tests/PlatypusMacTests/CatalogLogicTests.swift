@@ -231,3 +231,119 @@ final class BrowseRoutingTests: XCTestCase {
         XCTAssertLessThan(kindOrder(.radioReference), kindOrder(.repeaterBook))
     }
 }
+
+/// Radio programming capability — the Swift `Modulation.classify` mirrors the core classifier, and
+/// `RadioCapability.reason` de-emphasizes what a target radio can't take. All pure.
+final class RadioCapabilityTests: XCTestCase {
+    func testClassifyMirrorsCore() {
+        XCTAssertEqual(Modulation.classify(tech: "P25Standard", mode: nil), .p25)
+        XCTAssertEqual(Modulation.classify(tech: "MotoTRBO", mode: nil), .dmr)
+        XCTAssertEqual(Modulation.classify(tech: "NXDN48", mode: nil), .nxdn)
+        XCTAssertEqual(Modulation.classify(tech: nil, mode: "FM"), .analog)
+        XCTAssertEqual(Modulation.classify(tech: nil, mode: "NFM"), .analog)
+        XCTAssertEqual(Modulation.classify(tech: nil, mode: nil), .analog)
+        // A non-modulation tech tag falls through to the (analog) mode.
+        XCTAssertEqual(Modulation.classify(tech: "Conventional", mode: "FM"), .analog)
+    }
+
+    func testAnalogHandheldCapability() {
+        // FT-60-like: analog conventional only.
+        let cap = RadioCapability(trunking: false, modulations: ["analog"])
+        XCTAssertNotNil(cap)
+        // Analog conventional is fine.
+        XCTAssertNil(cap?.reason(isTrunked: false, tech: "FM", mode: "FM"))
+        // A trunk has no home (trunking checked first).
+        XCTAssertEqual(cap?.reason(isTrunked: true, tech: "P25Standard", mode: nil), .trunking)
+        // Digital conventional is rejected on modulation.
+        XCTAssertEqual(cap?.reason(isTrunked: false, tech: "DMR", mode: nil), .modulation(.dmr))
+        XCTAssertEqual(cap?.summary, "analog · conventional only")
+    }
+
+    func testUnknownCapabilityFailsOpen() {
+        // No modulations reported ⇒ unknown ⇒ nil (callers skip filtering).
+        XCTAssertNil(RadioCapability(trunking: false, modulations: []))
+    }
+
+    func testScannerCapabilityTakesEverything() {
+        let all = ["analog", "P25", "DMR", "NXDN", "D-STAR", "Fusion", "ProVoice", "digital"]
+        let cap = RadioCapability(trunking: true, modulations: all)
+        XCTAssertNil(cap?.reason(isTrunked: true, tech: "P25Standard", mode: nil))
+        XCTAssertNil(cap?.reason(isTrunked: false, tech: "DMR", mode: nil))
+        XCTAssertEqual(cap?.summary, "all modes · trunk + conventional")
+    }
+}
+
+/// The pure programming rules (`ProgrammingRules.swift`) — the write-path gate, the add-readiness
+/// 3-way, and the live-only backup gate. Exactly the logic that produced this session's two bugs.
+final class ProgrammingRulesTests: XCTestCase {
+    func testWritePathByTargetClass() {
+        // Clone-image takes any source (channels synthesized from a catalog channel).
+        XCTAssertTrue(writePath(target: .cloneImage, source: .hpdb))
+        XCTAssertTrue(writePath(target: .cloneImage, source: .radioReference))
+        // SD-card takes HPDB (selection) and RadioReference (synthesis).
+        XCTAssertTrue(writePath(target: .sdCard, source: .hpdb))
+        XCTAssertTrue(writePath(target: .sdCard, source: .radioReference))
+        // No radio → nothing is programmable.
+        XCTAssertFalse(writePath(target: nil, source: .hpdb))
+        XCTAssertFalse(writePath(target: nil, source: .radioReference))
+    }
+
+    func testAddReadinessByState() {
+        // Neutral — no radio chosen.
+        XCTAssertEqual(
+            addReadiness(deviceClass: nil, radioName: "x", hasImage: false, hasList: false, hasCard: false),
+            .notReady("Choose a radio to add channels."))
+        // Clone image must be read first, then ready.
+        XCTAssertEqual(
+            addReadiness(deviceClass: .cloneImage, radioName: "FT-60R", hasImage: false, hasList: false, hasCard: false),
+            .notReady("Read your FT-60R first to add channels."))
+        XCTAssertEqual(
+            addReadiness(deviceClass: .cloneImage, radioName: "FT-60R", hasImage: true, hasList: false, hasCard: false),
+            .ready)
+        // SD card: no card → open card; card but no list → select/add a list; list open → ready.
+        XCTAssertEqual(
+            addReadiness(deviceClass: .sdCard, radioName: "SDS150", hasImage: false, hasList: false, hasCard: false),
+            .notReady("Open your SDS150’s card first to add channels."))
+        XCTAssertEqual(
+            addReadiness(deviceClass: .sdCard, radioName: "SDS150", hasImage: false, hasList: false, hasCard: true),
+            .notReady("Select or add a favorites list to add channels."))
+        XCTAssertEqual(
+            addReadiness(deviceClass: .sdCard, radioName: "SDS150", hasImage: false, hasList: true, hasCard: true),
+            .ready)
+    }
+
+    func testNeedsBackupIsLiveOnly() {
+        XCTAssertTrue(needsBackup(isLive: true, backedUp: false))   // live card, no restore point
+        XCTAssertFalse(needsBackup(isLive: true, backedUp: true))   // live card, backed up
+        XCTAssertFalse(needsBackup(isLive: false, backedUp: false)) // backup folder — always safe
+        XCTAssertFalse(needsBackup(isLive: false, backedUp: true))
+    }
+
+    // MARK: - Write-to-card model gate (matchWritableCard)
+
+    func testNoCardWhenNoneDetected() {
+        XCTAssertEqual(matchWritableCard([], wantModel: "SDS150"), .noCard)
+    }
+
+    func testMatchesFirstCardOfWantedModel() {
+        let cards = [
+            CardIdentity(model: "BCD996"),
+            CardIdentity(model: "SDS150"),
+            CardIdentity(model: "SDS150"),
+        ]
+        // First SDS150 wins — model match on the product name, not device identity, so any SDS150
+        // qualifies. (We compare the shared `product_name`, not the serial `modelId`.)
+        XCTAssertEqual(matchWritableCard(cards, wantModel: "SDS150"), .match(1))
+    }
+
+    func testWrongModelWhenNoneMatch() {
+        let cards = [CardIdentity(model: "BCD996")]
+        XCTAssertEqual(matchWritableCard(cards, wantModel: "SDS150"), .wrongModel("BCD996"))
+    }
+
+    func testUnreadableModelNeverMatches() {
+        // A detected card whose header couldn't be read (nil model) is refused, never matched.
+        let cards = [CardIdentity(model: nil)]
+        XCTAssertEqual(matchWritableCard(cards, wantModel: "SDS150"), .wrongModel("different scanner"))
+    }
+}

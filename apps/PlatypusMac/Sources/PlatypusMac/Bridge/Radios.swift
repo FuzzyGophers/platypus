@@ -17,9 +17,15 @@ enum Radios {
         let channels: Int?
         let banks: Int?
         let nameLen: Int?
+        // What the radio can be programmed with (capability-aware browse): whether it stores
+        // trunked talkgroups, and the modulation labels it supports ("analog", "P25", "DMR", …).
+        // Optional so the decode tolerates capability schema growth — an absent field just means
+        // "unknown", and the app fails open (no filtering) rather than breaking the radio list.
+        let trunking: Bool?
+        let modulations: [String]?
 
         enum CodingKeys: String, CodingKey {
-            case id, name, maker, transport, channels, banks, nameLen
+            case id, name, maker, transport, channels, banks, nameLen, trunking, modulations
             case deviceClass = "class"
         }
     }

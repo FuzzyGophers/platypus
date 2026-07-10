@@ -12,6 +12,16 @@ Tracked future work. Run `just check` before pushing (see `CLAUDE.md`).
 
 ## UI / data
 
+- **Validate + finish FT-60 cross-source synthesis.** `makeFromCatalog`
+  ([`FT60Memory.swift`](apps/PlatypusMac/Sources/PlatypusMac/FT60/FT60Memory.swift)) programs a
+  source's conventional channels onto the FT-60 clone image, but that path has **not been round-tripped
+  on a real FT-60R** the way the SDS150 favorites synthesis was — write a synthesized image, read it
+  back on the radio, and confirm name/freq/tone/offset before relying on it. While validating, close
+  the fidelity gaps: it currently writes simplex RX memories (duplex/offset 0), so for the ham/
+  **RepeaterBook** flow carry input/offset + duplex ±, and verify RadioReference's conventional
+  `mode`/`tone` strings map cleanly (unknown modes fall back to FM today). Tie in with the RepeaterBook
+  provider item below.
+
 - **Display customization — hardware verification.** Confirm the `DisplayOption` col-11 label and
   the `Backlight` fields against a real card, and hardware-confirm the per-element area↔`DispColors`
   group pairing (spec-derived + example-confirmed, not yet verified on-device). Record in

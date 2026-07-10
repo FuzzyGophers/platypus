@@ -29,10 +29,9 @@ struct RadioModel: Identifiable, Hashable {
     /// Fixed memory capacity for clone-image radios (from the core registry); nil for SD-card
     /// scanners (whose limits come from the card's profile).
     let capacity: FTCapacity?
-
-    /// Browse is limited to conventional (non-trunked) systems for memory/clone radios that
-    /// can't store trunked talkgroups. Derived from the class, read at the call sites.
-    var conventionalOnly: Bool { deviceClass == .cloneImage }
+    /// What this radio can be programmed with (trunking + modulations), from the core registry.
+    /// nil ⇒ the core didn't report capability (unknown) → the browse fails open (no filtering).
+    let capability: RadioCapability?
 
     /// "SDS150 — Uniden · SD card" — the switcher/sheet row label.
     var menuTitle: String { "\(name) — \(maker) · \(transport)" }
@@ -66,6 +65,8 @@ struct RadioModel: Identifiable, Hashable {
         } else {
             self.capacity = nil
         }
+        self.capability = RadioCapability(
+            trunking: r.trunking ?? false, modulations: r.modulations ?? [])
     }
 }
 

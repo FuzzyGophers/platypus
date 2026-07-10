@@ -167,6 +167,9 @@ struct CatalogView: View {
     @State private var showingFt60Write = false
     /// SDS150 display-customization editor (gear popup).
     @State private var showDisplayEditor = false
+    /// Set to a reason string when the user double-clicks a row that can't be added — an explanatory
+    /// alert (why it's blocked, or that a target must be loaded first).
+    @State private var addAlert: String?
     /// Browse data sources (merge model) — a separate axis from the target radio (write).
     @StateObject private var dataSources = DataSourceStore()
     /// The source kind whose Add/config sheet is open, if any.
@@ -197,11 +200,20 @@ struct CatalogView: View {
         return ((dir as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
     }
 
+    /// A card's volume mount = two levels up from its `<model>/HPDB` dir (same shape as `cardMount`).
+    /// Used to read/verify a *connected* card's model before writing to it.
+    private func cardMount(forHpdbDir hpdbDir: String) -> String {
+        ((hpdbDir as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+    }
+
     /// Editing (adding/removing/renaming) is allowed once a list is open AND the
     /// card has been backed up this session.
     // Editing is in-memory staging — allowed whenever a list is open. The card is
     // only ever written by Save (`saveAll`), which is what requires a backup.
     private var canEdit: Bool { selectedListId != nil }
+
+    /// The live-only backup-before-save gate (pure rule in `ProgrammingRules`).
+    private var needsBackup: Bool { PlatypusMac.needsBackup(isLive: isLiveCard, backedUp: cardBackedUp) }
 
     // MARK: - Active-radio (class-driven — no per-model hardcoding)
 
@@ -211,11 +223,10 @@ struct CatalogView: View {
     /// opening an SD card still browses/maps). Registered with the aggregator as the `.hpdb` source.
     private var mapSourceLibrary: ScannerLibrary? { mapLibrary ?? library }
 
-    /// The browse rows to display, dropping trunked systems for a conventional-only radio (a clone HT
-    /// can't program them). Merged across every active source by the aggregator.
-    private var displayRows: [CatalogSystem] {
-        conventionalOnly ? browse.rows.filter { !$0.isTrunk } : browse.rows
-    }
+    /// The browse rows to display — every merged system across active sources. Systems the active
+    /// target radio can't program are **not** hidden; the row de-emphasizes + badges them, so users
+    /// keep awareness of what's on the air here. Merged across every active source by the aggregator.
+    private var displayRows: [CatalogSystem] { browse.rows }
 
     /// The geo + pin-channel providers for the Map lens, merged across every active source. `nil`
     /// when no source is active (nothing to plot). Pin ids are namespaced `<source>:<id>` so the
@@ -265,18 +276,66 @@ struct CatalogView: View {
         browse.location.map { $0.coordinate }
     }
 
-    /// A clone-image (memory) radio is active — the flat editor + conventional-only browse.
+    /// A clone-image (memory) radio is active — the flat editor.
     private var cloneActive: Bool { activeClass == .cloneImage }
-    /// Browse is limited to conventional systems for the active radio's class.
-    private var conventionalOnly: Bool { radios.active?.conventionalOnly ?? false }
-    /// Where an "add" lands, by class: the clone editor's memory, or an open SD favorites list.
-    /// Neutral (no radio) ⇒ nothing to add to.
-    private var canAdd: Bool {
-        switch activeClass {
-        case .cloneImage: return ft60 != nil
-        case .sdCard: return selectedListId != nil
-        case nil: return false
+
+    /// The active target's programming capability (nil ⇒ neutral / capability unknown → the browse
+    /// fails open: nothing is de-emphasized).
+    private var targetCapability: RadioCapability? { radios.active?.capability }
+
+    /// Why the active target can't take a browsed item right now — the radio physically can't
+    /// (capability), or we have no path from this source to this target yet (write path). nil ⇒ it's
+    /// addable (or there's no active target, in which case Add is disabled without a per-row reason).
+    private func addBlock(source: DataSourceKind, isTrunked: Bool, tech: String?, mode: String?)
+        -> AddBlock?
+    {
+        // 1) The radio physically can't take it (trunked on a conventional radio, digital on analog…).
+        if let why = targetCapability?.reason(isTrunked: isTrunked, tech: tech, mode: mode) {
+            return AddBlock(badge: why.badge, detail: why.detail)
         }
+        // 2) The radio *could* take it, but there's no code path from this source to this target yet.
+        // Independent of whether the target is loaded — it's a permanent limitation, so surface it
+        // whenever a radio is active (not in the neutral state).
+        if activeClass != nil, !canAddFrom(source) {
+            return AddBlock(badge: "not yet", detail: writePathDetail(source))
+        }
+        return nil
+    }
+
+    /// The reason the user can't add this item right now — its block reason, else the not-ready hint,
+    /// else nil (it's addable). Drives the double-click explanation on a greyed row.
+    private func addReason(_ block: AddBlock?) -> String? { block?.detail ?? notReadyReason }
+
+    private func addBlock(_ sys: CatalogSystem) -> AddBlock? {
+        addBlock(source: sys.source, isTrunked: sys.isTrunk, tech: sys.tech, mode: nil)
+    }
+    private func addBlock(_ ch: CatalogChannel, source: DataSourceKind) -> AddBlock? {
+        addBlock(source: source, isTrunked: ch.isTalkgroup, tech: nil, mode: ch.mode)
+    }
+    private func addBlock(_ geo: GeoSystem) -> AddBlock? {
+        addBlock(source: geo.source, isTrunked: geo.kind == "Trunk", tech: geo.tech, mode: nil)
+    }
+
+    /// Why a source's data can't be programmed to the active target yet (the write-path gap) — plain,
+    /// source-specific language (no internal "card scanner / synthesis" jargon).
+    private func writePathDetail(_ source: DataSourceKind) -> String {
+        "\(source.name) systems can’t be added to your \(radios.active?.name ?? "radio") yet."
+    }
+    /// The active target's readiness to receive channels — the pure rule (`ProgrammingRules`) fed the
+    /// current View state.
+    private var addReadiness: AddReadiness {
+        PlatypusMac.addReadiness(
+            deviceClass: radios.active?.deviceClass,
+            radioName: radios.active?.name ?? "radio",
+            hasImage: ft60?.canWrite == true,
+            hasList: selectedListId != nil,
+            hasCard: cardInfo != nil)
+    }
+    /// Where an "add" lands is ready — the whole-target gate (a loaded clone image / an open SD list).
+    private var canAdd: Bool { if case .ready = addReadiness { return true } else { return false } }
+    /// The reason adds are unavailable (nil when ready) — the disabled hint + double-click alert text.
+    private var notReadyReason: String? {
+        if case .notReady(let r) = addReadiness { return r } else { return nil }
     }
     /// Human name of the current add target ("FT-60R" / "list") for button labels.
     private var addTargetName: String { cloneActive ? (radios.active?.name ?? "radio") : "list" }
@@ -358,13 +417,14 @@ struct CatalogView: View {
                         if let providers = mapProviders {
                             MapLensView(geo: providers.geo, radiusChannels: providers.radius,
                                         filter: filter,
-                                        canAdd: canAdd && browse.capabilities.contains(.addToRadio),
-                                        conventionalOnly: conventionalOnly,
+                                        showAdd: activeClass != nil,
+                                        addReadyReason: notReadyReason,
                                         listName: cloneActive ? radios.active?.name : selectedList?.name,
                                         initialCenter: rrMapCenter,
                                         onLocationSearch: { coord in setLocation(coord: coord) },
                                         reloadToken: "\(browse.activeKinds.map(\.rawValue).joined(separator: ","))|\(mapPinToken)",
-                                        addAllowed: { canAddFrom($0.source) }) { id, lat, lon, miles in
+                                        addAllowed: { canAddFrom($0.source) },
+                                        blocked: { addBlock($0) }) { id, lat, lon, miles in
                                 addSystemRadiusToSelected(id, lat: lat, lon: lon, miles: miles)
                             }
                         } else {
@@ -444,6 +504,13 @@ struct CatalogView: View {
         }
         .sheet(isPresented: $showingManageRadios) {
             ManageRadiosSheet(radios: radios)
+        }
+        .alert("Can’t add this here", isPresented: Binding(
+            get: { addAlert != nil }, set: { if !$0 { addAlert = nil } })
+        ) {
+            Button("OK", role: .cancel) { addAlert = nil }
+        } message: {
+            if let addAlert { Text(addAlert) }
         }
         .onChange(of: radios.activeID) { syncActiveRadio() }
         // Progressively warm the map's real pin positions when the Map lens is shown / the location
@@ -770,12 +837,18 @@ struct CatalogView: View {
     private var mapEmptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: "map").font(.system(size: 34)).foregroundStyle(Theme.fg3)
-            Text("No map source").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.fg)
-            Text("Open a Uniden folder to plot systems by location.")
+            Text("No data source").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.fg)
+            Text("Add a data source to plot systems by location.")
                 .font(.system(size: 11)).foregroundStyle(Theme.fg3)
                 .multilineTextAlignment(.center)
-            Button { openMapSource() } label: {
-                Label("Open a Uniden folder", systemImage: "folder")
+            // The map plots any active source, so offer both — a local Uniden folder or Radio Reference.
+            HStack(spacing: 8) {
+                Button { openMapSource() } label: {
+                    Label("Open a Uniden folder", systemImage: "folder")
+                }
+                Button { addingSource = .radioReference } label: {
+                    Label("Add Radio Reference", systemImage: "antenna.radiowaves.left.and.right")
+                }
             }.controlSize(.large)
         }
         .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -861,6 +934,11 @@ struct CatalogView: View {
     private var filterSidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                // What the active target radio can be programmed with — explains why some browsed
+                // systems/channels are greyed. Only when a radio with known capability is active.
+                if let cap = targetCapability, let radio = radios.active {
+                    capabilityLegend(radio: radio, cap: cap)
+                }
                 section("SERVICE TYPE") {
                     ForEach(ServiceType.filterOrderAlphabetical, id: \.self) { code in
                         let info = ServiceType.info(code)
@@ -889,6 +967,22 @@ struct CatalogView: View {
             .padding(14)
         }
         .background(Theme.bg2)
+    }
+
+    /// A compact "what your target radio can take" legend — explains the greyed rows/pins. Renders
+    /// straight from the active radio's capability descriptor (no hard-coding).
+    private func capabilityLegend(radio: RadioModel, cap: RadioCapability) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("PROGRAMS").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.fg3)
+            HStack(spacing: 5) {
+                Image(systemName: radio.symbol).font(.system(size: 11)).foregroundStyle(radio.accent)
+                Text(radio.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.fg)
+            }
+            Text(cap.summary)
+                .font(.system(size: 10.5)).foregroundStyle(Theme.fg2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Favorites list selector (right pane top bar)
@@ -1244,11 +1338,12 @@ struct CatalogView: View {
         .listRowBackground(Theme.bg)
     }
 
-    /// Whether channels from a given source can be added to the active target — gated on the source
-    /// supporting `.addToRadio` (HPDB today; RadioReference/RepeaterBook card-write lands later).
+    /// Whether channels from a given source can be programmed onto the **active target** — the pure
+    /// `writePath` rule (`ProgrammingRules`) fed the active radio class.
     private func canAddFrom(_ kind: DataSourceKind) -> Bool {
-        browse.capabilities(of: kind).contains(.addToRadio)
+        writePath(target: activeClass, source: kind)
     }
+
 
     /// The grey sub-line under a system name: the best detail the source gave — home city, else the
     /// site count (trunked) / "conventional". Degrades consistently per source.
@@ -1259,26 +1354,31 @@ struct CatalogView: View {
     }
 
     private func systemRow(_ sys: CatalogSystem) -> some View {
-        HStack(spacing: 8) {
-            // "+" adds the system's channels to the open list (when one is open + the source can add).
+        // Why the active target can't take this system (nil = it can) — greys + badges + disables Add.
+        let block = addBlock(sys)
+        return HStack(spacing: 8) {
+            // "+" adds the system's channels to the open target (when there's one + it can take them).
             Button { addSystemToSelected(sys) } label: {
                 Image(systemName: "plus.circle").font(.system(size: 14)).foregroundStyle(Theme.accent)
             }
-            .buttonStyle(.plain).disabled(!canAdd || !canAddFrom(sys.source))
-            .help(cloneActive ? "Add this system's channels to the \(addTargetName)" : "Add this system's channels to the open list")
+            .buttonStyle(.plain).disabled(!canAdd || block != nil)
+            .help(block?.detail ?? (cloneActive ? "Add this system's channels to the \(addTargetName)" : "Add this system's channels to the open list"))
             Button { toggleExpand(sys) } label: {
                 HStack(spacing: 8) {
                     Image(systemName: sys.isTrunk ? "antenna.radiowaves.left.and.right" : "radio")
                         .font(.system(size: 13)).foregroundStyle(Theme.fg2).frame(width: 16)
+                        .opacity(block == nil ? 1 : 0.5)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(sys.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
                         Text(systemSubtitle(sys))
                             .font(.system(size: 10.5)).foregroundStyle(Theme.fg3)
                     }
+                    .opacity(block == nil ? 1 : 0.5)
                     Spacer()
                     // Provenance badge only when several sources are merged — otherwise it's noise.
                     if browse.activeCount > 1 { sourceBadge(sys.source) }
-                    if let tech = sys.tech { badge(tech) }
+                    // The block reason takes the badge slot (it usually names the tech).
+                    if let block { blockBadge(block) } else if let tech = sys.tech { badge(tech) }
                     Image(systemName: expanded.contains(sys.compositeID) ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10)).foregroundStyle(Theme.fg3).frame(width: 12)
                 }
@@ -1288,33 +1388,46 @@ struct CatalogView: View {
         }
         .padding(.vertical, 5)
         .listRowBackground(Theme.bg)
+        // Double-click a greyed row to learn why it can't be added (single-click still expands).
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            if let reason = addReason(block) { addAlert = reason }
+        })
     }
 
     private func channelRow(_ ch: CatalogChannel, _ sys: CatalogSystem) -> some View {
         let info = ServiceType.info(ch.serviceType)
+        // Why the active target can't take this channel (nil = it can) — greys + badges + disables Add.
+        let block = addBlock(ch, source: sys.source)
         return HStack(alignment: .top, spacing: 8) {
             Spacer().frame(width: 22)
-            Button { addChannels([ch]) } label: {
+            Button { addChannelOrSystem(ch, from: sys) } label: {
                 Image(systemName: "plus.circle").font(.system(size: 12)).foregroundStyle(Theme.accent)
             }
-            .buttonStyle(.plain).disabled(!canAdd || !canAddFrom(sys.source))
-            .help(cloneActive ? "Add this channel to the \(addTargetName)" : "Add this channel to the open list")
+            .buttonStyle(.plain).disabled(!canAdd || block != nil)
+            .help(block?.detail ?? (cloneActive ? "Add this channel to the \(addTargetName)" : "Add this channel to the open list"))
             Image(systemName: info.symbol).font(.system(size: 12)).foregroundStyle(info.color)
-                .frame(width: 14).padding(.top, 1)
+                .frame(width: 14).padding(.top, 1).opacity(block == nil ? 1 : 0.5)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(ch.name).font(.system(size: 12.5)).lineLimit(1)
+                    if let block { blockBadge(block) }
                 }
                 Text(channelDetailLine(ch)).font(.system(size: 10.5)).foregroundStyle(Theme.fg3)
                     .lineLimit(1)
             }
+            .opacity(block == nil ? 1 : 0.5)
             Spacer()
             // Primary identifier (TGID for trunked, frequency for conventional).
             Text(ch.detail).font(.system(size: 11.5, weight: .medium).monospacedDigit())
                 .foregroundStyle(Theme.fg2).frame(width: 96, alignment: .trailing)
+                .opacity(block == nil ? 1 : 0.5)
         }
         .padding(.vertical, 4)
         .listRowBackground(Theme.bg)
+        // Double-click a greyed channel to learn why it can't be added.
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            if let reason = addReason(block) { addAlert = reason }
+        })
     }
 
     /// The grey sub-line under a channel: what it is + the key parameters
@@ -1354,7 +1467,7 @@ struct CatalogView: View {
     private var editorColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             // The unified radio card — header + Open/Read/Write + the list chooser (detail slot).
-            sdCardCard.padding(14)
+            sdRadioCard.padding(14)
             Divider().overlay(Theme.border)
 
             if cardMount == nil {
@@ -1394,18 +1507,25 @@ struct CatalogView: View {
     /// The SD-card radio card — header + Open/Read/Write, with the list chooser + capacity in the
     /// shared detail slot. Read = mount, Write = save changes, Open = a backup folder. The gear +
     /// Eject collapse into the single ⋯ menu (`cardMenuItems`).
-    private var sdCardCard: some View {
+    private var sdRadioCard: some View {
         RadioCardView(
             symbol: radios.active?.symbol ?? "sdcard",
             tint: cardMount == nil ? .idle : .sdCard,
             name: radios.active?.name ?? "SDS150", subtitle: sdCardSubtitle,
-            connected: cardMount != nil,
+            // The green "live/connected" dot lights only for a live card — a backup folder isn't a
+            // live device (the blue tile + "backup folder" subtitle still show it's open).
+            connected: isLiveCard,
             warning: cardModified ? "modified — eject before reconnecting" : nil,
             menuItems: cardMenuItems,
             onOpen: openBackupCard, onRead: openCard, onWrite: { saveAll() },
-            writeDisabled: cardMount == nil || !anyPending || !cardBackedUp,
-            writeHelp: cardMount != nil && anyPending && !cardBackedUp
-                ? "Back up the card first, then Write" : "Save changes to the card"
+            writeDisabled: cardMount == nil || !anyPending || needsBackup,
+            // Verb + help follow the target: "Write" to a live card, "Save" to a backup folder.
+            writeHelp: needsBackup
+                ? "Back up the card first, then Write"
+                : (isLiveCard ? "Write changes to the card" : "Save changes to the backup folder"),
+            writeLabel: (cardMount != nil && !isLiveCard) ? "Save" : "Write",
+            // Editing a backup → offer to push it onto a connected card (a live card already has Write).
+            onWriteToRadio: (cardMount != nil && !isLiveCard) ? { writeToRadio() } : nil
         ) {
             listBar
         }
@@ -1431,9 +1551,12 @@ struct CatalogView: View {
     }
 
     /// Subtitle for the SD-card header: the card/volume + list count + live-vs-backup, or "no card".
+    /// A live card shows its volume name; a backup shows the backup **folder** name (the volume it lives
+    /// on — e.g. "Macintosh HD" — is meaningless for a backup).
     private var sdCardSubtitle: String {
-        Self.sdCardSubtitle(
-            hasCard: cardMount != nil, volume: cardVolumeName,
+        let name = isLiveCard ? cardVolumeName : ((cardMount as NSString?)?.lastPathComponent ?? "")
+        return Self.sdCardSubtitle(
+            hasCard: cardMount != nil, volume: name,
             lists: workingLists.count, isLive: isLiveCard)
     }
 
@@ -1648,6 +1771,9 @@ struct CatalogView: View {
                                 systemDetailsPopover(sys)
                             }
                         avoidToggle(sys.avoid) { toggleAvoid(target: sys.id, currentlyAvoided: sys.avoid) }
+                        Button { removeFromSelected(sys.groups.flatMap { $0.channels.map(\.id) }) } label: {
+                            Image(systemName: "minus.circle").font(.system(size: 12)).foregroundStyle(Theme.fg3)
+                        }.buttonStyle(.plain).disabled(!canEdit).help("Remove this system from the list")
                     }
                     .padding(8)
 
@@ -1665,6 +1791,9 @@ struct CatalogView: View {
                                 avoidToggle(group.avoid) {
                                     toggleAvoid(target: group.id, currentlyAvoided: group.avoid)
                                 }
+                                Button { removeFromSelected(group.channels.map(\.id)) } label: {
+                                    Image(systemName: "minus.circle").font(.system(size: 11)).foregroundStyle(Theme.fg3)
+                                }.buttonStyle(.plain).disabled(!canEdit).help("Remove this department from the list")
                             }
                             .padding(.horizontal, 8).padding(.vertical, 3)
                             .background(Theme.bg2)
@@ -2045,9 +2174,9 @@ struct CatalogView: View {
             }
             if anyPending {
                 Text("Pending: \(pendingSummary)").font(.system(size: 11)).foregroundStyle(Theme.fg2)
-                // Edits stage freely; saving them to the card requires a backup first. The Write
-                // button lives in the header (disabled until backed up); this is the backup CTA.
-                if !cardBackedUp { backupBanner }
+                // Edits stage freely; saving them to a live card requires a backup first (a backup
+                // folder saves without one). The Write button lives in the header; this is the CTA.
+                if needsBackup { backupBanner }
             }
         }
     }
@@ -2087,6 +2216,19 @@ struct CatalogView: View {
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(Theme.chip).foregroundStyle(Theme.fg2)
             .clipShape(RoundedRectangle(cornerRadius: Theme.rChip))
+    }
+
+    /// A muted "the active radio can't take this" chip — the reason a de-emphasized row/pin isn't
+    /// addable (e.g. "trunked", "P25", "not yet"). Hover shows the full explanation.
+    private func blockBadge(_ block: AddBlock) -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: "slash.circle").font(.system(size: 8, weight: .bold))
+            Text(block.badge).font(.system(size: 10, weight: .bold))
+        }
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .overlay(RoundedRectangle(cornerRadius: Theme.rChip).stroke(Theme.border))
+        .foregroundStyle(Theme.fg3)
+        .help(block.detail)
     }
 
     // MARK: - Actions
@@ -2543,8 +2685,12 @@ struct CatalogView: View {
     // MARK: - Adding to the open list ("add this to my favorite here")
 
     /// Add a system's channels to the open target — from the drill cache if present, else fetched
-    /// from its source off-main.
+    /// from its source off-main. A non-HPDB source on an SD card is **synthesized** whole-system.
     private func addSystemToSelected(_ sys: CatalogSystem) {
+        if activeClass == .sdCard, sys.source != .hpdb {
+            synthesizeSystemIntoList(source: sys.source, systemRef: sys.id)
+            return
+        }
         let ck = sys.compositeID
         if let chans = channelCache[ck] { addChannels(chans); return }
         let f = filter
@@ -2555,13 +2701,27 @@ struct CatalogView: View {
     }
 
     /// Add a map pin's channels scoped to the map center + radius (only what's near here). Routes to
-    /// the owning source by the pin's namespaced id; gated on that source supporting `.addToRadio`.
+    /// the owning source by the pin's namespaced id. A non-HPDB source on an SD card is synthesized.
     private func addSystemRadiusToSelected(_ nsId: String, lat: Double, lon: Double, miles: Double) {
         guard let (kind, localId) = Self.splitNamespace(nsId) else { return }
+        if activeClass == .sdCard, kind != .hpdb {
+            synthesizeSystemIntoList(source: kind, systemRef: localId)
+            return
+        }
         let f = filter
         DispatchQueue.global(qos: .userInitiated).async {
             let chans = browse.channelsForPin(localId, source: kind, lat: lat, lon: lon, miles: miles, f)
             DispatchQueue.main.async { addChannels(chans) }
+        }
+    }
+
+    /// Add one channel — but a non-HPDB source on an SD card can't be cherry-picked (favorites are
+    /// synthesized whole-system), so route it to the system synthesizer instead.
+    private func addChannelOrSystem(_ ch: CatalogChannel, from sys: CatalogSystem) {
+        if activeClass == .sdCard, sys.source != .hpdb {
+            synthesizeSystemIntoList(source: sys.source, systemRef: sys.id)
+        } else {
+            addChannels([ch])
         }
     }
 
@@ -2607,16 +2767,39 @@ struct CatalogView: View {
         selectedSummary = nil
     }
 
-    /// Open a list in the editor, lazy-loading its content from the card.
+    /// Open a list in the editor, lazy-loading its content from the card. The slot read (from a slow
+    /// SD card) and the display parse both run off-main — a large list (e.g. a whole statewide trunked
+    /// system) would otherwise beachball on selection. The derived views publish on main only if this
+    /// list is still selected and an edit hasn't swapped its content handle in the meantime.
     private func selectList(_ id: UUID) {
         selectedListId = id
-        if contentById[id] == nil,
-            let wl = workingLists.first(where: { $0.id == id }), let slot = wl.slot,
-            let mount = cardMount
-        {
-            contentById[id] = Favorites.open(cardMount: mount, slot: slot)
+        let existing = contentById[id]
+        let source = workingLists.first(where: { $0.id == id })?.slot
+            .flatMap { slot in cardMount.map { (mount: $0, slot: slot) } }
+        // A brand-new, unsaved list (no slot, no content yet) — nothing to load; clear the editor.
+        guard existing != nil || source != nil else {
+            selectedSystems = []
+            selectedTree = []
+            selectedSummary = nil
+            return
         }
-        refreshSelectedView()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let content = existing ?? source.flatMap { Favorites.open(cardMount: $0.mount, slot: $0.slot) }
+            let systems = content?.systems() ?? []
+            let tree = content?.tree() ?? []
+            let summary = content?.summary()
+            DispatchQueue.main.async {
+                guard selectedListId == id else { return }  // selection moved on while loading
+                if existing == nil, let content { contentById[id] = content }
+                // Skip only if an edit swapped this list's content handle while we parsed (its own
+                // refresh already published the newer view). A failed read (content == nil) falls
+                // through and publishes the empty views, clearing the editor as before.
+                if let content, contentById[id] !== content { return }
+                selectedSystems = systems
+                selectedTree = tree
+                selectedSummary = summary
+            }
+        }
     }
 
     private func refreshSelectedView() {
@@ -2656,6 +2839,33 @@ struct CatalogView: View {
         contentById[id] = next
         workingLists[i].contentDirty = true
         refreshSelectedView()
+    }
+
+    /// Synthesize a browsed system (RadioReference) into the open SD-card list — the networked
+    /// equivalent of `mutateSelectedContent`, run off-main so the RR fetch never blocks the UI.
+    private func synthesizeSystemIntoList(source: DataSourceKind, systemRef: String) {
+        guard let id = selectedListId, let cur = contentById[id] else { return }
+        let agg = browse
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let next = agg.appendToFavorites(
+                cur, source: source, systemRef: systemRef, departmentsOn: false)
+            else { return }
+            // Parse the derived views off-main too — a statewide trunked system makes `tree()`/
+            // `systems()` non-trivial, and doing them here (on the freshly-built, exclusively-owned
+            // handle) keeps the finish off the main thread. Only the @State assignment + SwiftUI
+            // diff land on main.
+            let systems = next.systems()
+            let tree = next.tree()
+            let summary = next.summary()
+            DispatchQueue.main.async {
+                guard selectedListId == id, let i = selectedIndex else { return }
+                contentById[id] = next
+                workingLists[i].contentDirty = true
+                selectedSystems = systems
+                selectedTree = tree
+                selectedSummary = summary
+            }
+        }
     }
 
     private func removeFromSelected(_ favIDs: [String]) {
@@ -2725,7 +2935,9 @@ struct CatalogView: View {
     /// progress modal (off the main thread) and confirms with a modal when done.
     /// `thenEject` chains an eject on success (the "Save & Eject" flow).
     private func saveAll(thenEject: Bool = false) {
-        guard cardBackedUp, let mount = cardMount, anyPending else { return }
+        guard !needsBackup, let mount = cardMount, anyPending else { return }
+        // A live card gets the eject reminder + backup mirror; a backup folder is just saved in place.
+        let live = isLiveCard
 
         // 1. Assign free slots to any new lists (mutates @State — main thread).
         var used = Set(workingLists.compactMap { $0.slot })
@@ -2753,14 +2965,20 @@ struct CatalogView: View {
         // same writes into it so it stays a faithful, current copy and the next launch
         // can load from the SSD copy instead of re-reading the whole card.
         let model = cardInfo?.model ?? "Scanner"
-        let mirror: URL? = BackupStore.latest(model: model, volumeName: cardVolumeName)
-            .map { URL(fileURLWithPath: $0.folder, isDirectory: true) }
-            .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        // Only a live card mirrors into its backup; a backup folder is edited in place (nothing to
+        // mirror into).
+        let mirror: URL? = live
+            ? BackupStore.latest(model: model, volumeName: cardVolumeName)
+                .map { URL(fileURLWithPath: $0.folder, isDirectory: true) }
+                .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+            : nil
         let total = dirty.count + 1 + (mirror == nil ? 0 : 1)  // slots + layout (+ mirror)
 
-        opTitle = "Saving to the card"
+        opTitle = live ? "Saving to the card" : "Saving to the backup"
         opIcon = "square.and.arrow.down"
-        opNote = "Writing your changes to the card. Don't disconnect the card."
+        opNote = live
+            ? "Writing your changes to the card. Don't disconnect the card."
+            : "Writing your changes to the backup folder."
         opToken = nil  // a card write must not be interrupted half-way
         opPhase = "Preparing…"
         opFraction = 0
@@ -2817,13 +3035,18 @@ struct CatalogView: View {
                     mirrored = true
                 }
             }
-            // Done — re-baseline from the card (pending clears) and confirm.
+            // Done — re-baseline (pending clears) and confirm.
             DispatchQueue.main.async {
                 opPhase = "Done"
                 opFraction = 1
                 opActive = false
-                cardModified = true
                 reloadCardInfo()
+                guard live else {
+                    // A backup folder was saved in place — no physical card, so no eject reminder.
+                    flashStatus("Saved changes to the backup folder.", level: .success)
+                    return
+                }
+                cardModified = true  // a physical card changed — eject before reconnecting
                 if mirrored {
                     flashStatus(
                         "Saved all changes — backup updated to match. Eject before reconnecting.",
@@ -2979,6 +3202,127 @@ struct CatalogView: View {
         }
     }
 
+    /// From the backup-editing context ("Write to Card…"): detect a connected card and write the
+    /// **favorites** onto it — fast (the big HPDB browse DB is left untouched), no backup. Detects on
+    /// click (no background polling). A live card already has Write; a backup on disk reaches the
+    /// physical card through here. Whole-card recovery is the separate ⋯ Restore….
+    private func writeToRadio() {
+        guard cardMount != nil else { return }
+        let radioName = radios.active?.name ?? "scanner"
+        let cards = ScannerCard.detect()
+        // Only write to a card of the model we're programming (an SDS150) — a *model* match, not a
+        // specific device. Compare on the card's product name (`CardInfo.model`), which shares the
+        // profile's `product_name()` with the app's radio `name` — NOT `modelId` (the serial id).
+        let ids = cards.map { card in
+            CardIdentity(model: CardFavorites.read(cardMount: cardMount(forHpdbDir: card.hpdbDir))?.model)
+        }
+        let card: DetectedCard
+        switch matchWritableCard(ids, wantModel: radioName) {
+        case .match(let i):
+            card = cards[i]
+        case .noCard:
+            let a = NSAlert()
+            a.messageText = "No card detected"
+            a.informativeText =
+                "Connect your \(radioName) in USB mass-storage mode, then try again."
+            a.runModal()
+            return
+        case .wrongModel(let other):
+            let a = NSAlert()
+            a.messageText = "That card isn’t an \(radioName)"
+            a.informativeText =
+                "The connected card is a \(other). Connect an \(radioName) card to write your "
+                + "favorites to it."
+            a.runModal()
+            return
+        }
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = "Write your favorites onto “\(card.volumeName)”?"
+        confirm.informativeText =
+            "Your favorites lists are written to the card, replacing the card's current lists. "
+            + "Eject before reconnecting to the scanner."
+        confirm.addButton(withTitle: "Write to Card")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        writeFavoritesToCard(cardHpdbDir: card.hpdbDir, cardName: card.volumeName)
+    }
+
+    /// Write the open backup's favorites lists onto a connected card — the same fast, verified path a
+    /// normal save uses (`writeSlot` per list + `applyLayout`, which deletes `app_data.cfg` + fsyncs).
+    /// No backup: the user is deliberately writing their changes.
+    private func writeFavoritesToCard(cardHpdbDir: String, cardName: String) {
+        guard let backupMount = cardMount else { return }
+        let connectedMount = cardMount(forHpdbDir: cardHpdbDir)
+        // Snapshot the working set on the main thread; content is loaded lazily from the backup.
+        let lists: [(slot: UInt32, id: UUID)] = workingLists.compactMap { wl in
+            wl.slot.map { (slot: $0, id: wl.id) }
+        }
+        let loaded = contentById
+        let entries = workingLists.compactMap { wl in
+            wl.slot.map {
+                (slot: $0, name: wl.name, monitor: Bool?.some(wl.monitor),
+                    quickKey: wl.quickKey, numberTag: wl.numberTag)
+            }
+        }
+        guard !lists.isEmpty else { return }
+
+        opTitle = "Writing to the card"
+        opIcon = "square.and.arrow.down"
+        opNote = "Writing your favorites onto the card. Don't disconnect it."
+        opToken = nil
+        opPhase = "Writing favorites…"
+        opFraction = 0
+        opActive = true
+        cardStatus = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let total = lists.count + 1
+            for (i, item) in lists.enumerated() {
+                // Loaded content else open it from the backup, then write it to the card slot (fsync'd).
+                let fav = loaded[item.id] ?? Favorites.open(cardMount: backupMount, slot: item.slot)
+                if let err = fav?.writeSlot(cardMount: connectedMount, slot: item.slot) {
+                    DispatchQueue.main.async {
+                        opActive = false
+                        cardStatus = CardBanner(text: "Write to card failed: \(err)", level: .error)
+                    }
+                    return
+                }
+                DispatchQueue.main.async { opFraction = Double(i + 1) / Double(total) }
+            }
+            // Rewrite f_list.cfg to match + delete app_data.cfg + fsync (one structural pass).
+            if let err = CardFavorites.applyLayout(cardMount: connectedMount, entries: entries) {
+                DispatchQueue.main.async {
+                    opActive = false
+                    cardStatus = CardBanner(text: "Write to card failed: \(err)", level: .error)
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                opFraction = 1
+                opActive = false
+                confirmWrittenToCard(cardHpdbDir: cardHpdbDir, cardName: cardName)
+            }
+        }
+    }
+
+    /// After writing to the connected card: confirm + offer to eject **that card** (not the open backup).
+    private func confirmWrittenToCard(cardHpdbDir: String, cardName: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Favorites written to “\(cardName)”"
+        alert.informativeText =
+            "Your favorites are on the card. Eject it before reconnecting to the scanner."
+        alert.addButton(withTitle: "Done")  // default
+        alert.addButton(withTitle: "Eject Card")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        do {
+            let vol = try CardVolume.eject(fileOnCard: cardHpdbDir)
+            flashStatus("Ejected “\(vol)”. Safe to reconnect to the scanner.", level: .success)
+        } catch {
+            cardStatus = CardBanner(text: "Eject failed: \(error.localizedDescription)", level: .error)
+        }
+    }
+
     private func restoreCard() {
         guard let mount = cardMount else { return }
         let panel = NSOpenPanel()
@@ -3074,27 +3418,43 @@ struct CatalogView: View {
 
     private func performEject() {
         guard let mount = cardMount else { return }
-        do {
-            let vol = try CardVolume.eject(fileOnCard: mount)
-            status = "Ejected “\(vol)”. Safe to reconnect."
-            cardStatus = nil
-            isLiveCard = false
-            cardVolumeName = ""
-            cardModified = false
-            cardBackedUp = false
-            // The card is gone — drop the editor library + card state. If it was also the HPDB
-            // browse source (no separate map folder), forget that too and re-query what's left.
-            library = nil
-            libraryDir = nil
-            cardInfo = nil
-            if mapLibrary == nil {
-                dataSources.signOutHpdb()
-                syncAggregator()
-                refresh()
+        // `unmountAndEjectDevice` flushes buffered FAT writes then unmounts — it can block for
+        // seconds on a slow card, so run it off-main behind the overlay instead of freezing the UI.
+        opTitle = "Ejecting the card"
+        opIcon = "eject"
+        opNote = "Flushing writes and unmounting. Don't remove the card yet."
+        opToken = nil
+        opPhase = "Ejecting…"
+        opFraction = 0
+        opActive = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try CardVolume.eject(fileOnCard: mount) }
+            DispatchQueue.main.async {
+                opActive = false
+                switch result {
+                case .success(let vol):
+                    status = "Ejected “\(vol)”. Safe to reconnect."
+                    cardStatus = nil
+                    isLiveCard = false
+                    cardVolumeName = ""
+                    cardModified = false
+                    cardBackedUp = false
+                    // The card is gone — drop the editor library + card state. If it was also the
+                    // HPDB browse source (no separate map folder), forget that too and re-query.
+                    library = nil
+                    libraryDir = nil
+                    cardInfo = nil
+                    if mapLibrary == nil {
+                        dataSources.signOutHpdb()
+                        syncAggregator()
+                        refresh()
+                    }
+                    syncWorkingLists()  // cardInfo is nil now → clears the working set
+                case .failure(let error):
+                    status =
+                        "Eject failed: \(error.localizedDescription) — close anything using the card and retry."
+                }
             }
-            syncWorkingLists()  // cardInfo is nil now → clears the working set
-        } catch {
-            status = "Eject failed: \(error.localizedDescription) — close anything using the card and retry."
         }
     }
 

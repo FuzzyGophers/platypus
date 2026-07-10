@@ -175,6 +175,17 @@ final class RadioReferenceSource {
         }
     }
 
+    /// Synthesize this system's SDS150 favorites records (from the fetched RR sites/talkgroups) and
+    /// merge them into `fav`, returning a new handle. Networked; the caller is already off-main.
+    func appendToFavorites(_ fav: Favorites, systemRef: String, departmentsOn: Bool) -> Favorites? {
+        queue.sync {
+            let h = systemRef.withCString {
+                platypus_favorites_append_from_rr(fav.handle, handle, $0, departmentsOn)
+            }
+            return Favorites(handle: h)
+        }
+    }
+
     /// The location's systems as map pins (drilled systems at their real site, others at the county
     /// centroid). `lat`/`lon`/`miles` are accepted for parity with the library but not used to prune.
     func geo(lat: Double, lon: Double, miles: Double, _ f: FilterState) -> [GeoSystem] {
@@ -348,6 +359,17 @@ final class RadioReferenceBrowseSource: BrowseSource {
 
     func channels(system: String, _ filter: FilterState) -> [CatalogChannel] {
         session?.channels(systemRef: system, filter) ?? []
+    }
+
+    /// Synthesize the given system's favorites onto an SD card via the currently-open session (the
+    /// browsed location's). Networked — call off the main thread.
+    func appendToFavorites(_ fav: Favorites, systemRef: String, departmentsOn: Bool) -> Favorites? {
+        let s: RadioReferenceSource? = {
+            sessionLock.lock()
+            defer { sessionLock.unlock() }
+            return session
+        }()
+        return s?.appendToFavorites(fav, systemRef: systemRef, departmentsOn: departmentsOn)
     }
 
     func categories(system: String, includeAll: Bool) -> [BrowseCategory]? {

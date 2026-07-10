@@ -19,12 +19,12 @@ struct MapLensView: View {
         (_ systemID: String, _ lat: Double, _ lon: Double, _ miles: Double, _ filter: FilterState)
             -> [CatalogChannel]
     let filter: FilterState
-    /// Whether a favorites list is open to add into.
-    let canAdd: Bool
-    /// When true (a conventional-only radio is active), drop trunked systems — a clone-image
-    /// HT can't use them.
-    var conventionalOnly: Bool = false
-    /// Name of the open favorites list, for the confirm dialog.
+    /// Whether a radio is active (show the Add affordances at all — gated by `addReadyReason`).
+    let showAdd: Bool
+    /// The reason adds aren't possible yet (nil ⇒ ready). Non-nil disables Add + is the hint /
+    /// popover message (e.g. "Read your FT-60R first to add channels.").
+    let addReadyReason: String?
+    /// Name of the open favorites list (or radio), for the confirm dialog.
     let listName: String?
     /// When set (a location-queryable source like RadioReference has a fetched location), the map
     /// auto-centers there and loads on open — no "pan and Load here" step. Nil for HPDB (nationwide).
@@ -36,9 +36,14 @@ struct MapLensView: View {
     /// Changes whenever the active source set changes — the lens re-queries so a removed source's
     /// pins drop (and an added source's appear) without needing a pan/filter change.
     var reloadToken: String = ""
-    /// Per-pin add gate — a source without `.addToRadio` (RadioReference) can be browsed on the map
-    /// but not programmed, so its pins' Add button is disabled. Default: all pins addable.
+    /// Per-pin add gate by source × active target — a source with no write path to the current
+    /// target radio can be browsed on the map but not programmed, so its pins' Add is disabled.
+    /// Default: all pins addable.
     var addAllowed: ((GeoSystem) -> Bool)? = nil
+    /// Per-pin add gate — why the active target can't take this pin (nil = it can): the radio can't
+    /// program it (capability) or there's no path from its source yet. Blocked pins are dimmed and
+    /// their Add is disabled with the reason. Default: all pins fit.
+    var blocked: ((GeoSystem) -> AddBlock?)? = nil
     /// Add a system (by `d<i>s<j>` id) to the open list, scoped to the current map
     /// center + radius (only the departments near here). Declared last so it takes the trailing closure.
     let onAdd: (_ systemID: String, _ lat: Double, _ lon: Double, _ miles: Double) -> Void
@@ -68,7 +73,8 @@ struct MapLensView: View {
     @State private var reanchorWork: DispatchWorkItem?
 
     /// Count of in-range systems staged for the "Add area" confirmation (nil = no dialog).
-    @State private var pendingArea: Int?
+    /// The addable systems staged for the "Add area" confirmation (nil = no dialog).
+    @State private var pendingArea: [GeoSystem]?
     /// The hovered system — its coverage circle shows only while the cursor is over its pin.
     @State private var hoveredID: String?
     /// The system whose info popover is open (nil = none). Single-click a pin to inspect a net.
@@ -139,19 +145,27 @@ struct MapLensView: View {
         .confirmationDialog(confirmTitle, isPresented: pendingBinding, titleVisibility: .visible) {
             Button("Add", action: commit)
             Button("Cancel", role: .cancel) { pendingArea = nil }
+        } message: {
+            if pendingSkipped > 0 {
+                Text("\(pendingSkipped) more in view can’t be programmed to this radio and will be skipped.")
+            }
         }
     }
 
     /// A map pin: a colored service-type badge. Hover reveals its coverage circle; a single
     /// click opens the net's info popover.
     private func pin(_ sys: GeoSystem) -> some View {
-        Image(systemName: ServiceType.info(sys.serviceType).symbol)
+        // The active target can't take this system → grey + dim it (still visible + tappable for
+        // awareness), rather than hide it.
+        let isBlocked = blocked?(sys) != nil
+        return Image(systemName: ServiceType.info(sys.serviceType).symbol)
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.white)
             .frame(width: 28, height: 28)
-            .background(Circle().fill(color(sys)))
+            .background(Circle().fill(isBlocked ? Color.gray : color(sys)))
             .overlay(Circle().stroke(.white, lineWidth: 1.5))
             .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+            .opacity(isBlocked ? 0.5 : 1)
             .contentShape(Circle())
             .modifier(AppearIn())  // gently fade + scale in as its site warms (no teleport)
             .onHover { hoveredID = $0 ? sys.id : nil }
@@ -167,8 +181,12 @@ struct MapLensView: View {
     }
 
     private var confirmTitle: String {
-        pendingArea.map { "Add \($0) systems to “\(listLabel)”?" } ?? ""
+        guard let n = pendingArea?.count else { return "" }
+        return "Add \(n) system\(n == 1 ? "" : "s") to “\(listLabel)”?"
     }
+
+    /// How many in-range systems the confirm dialog is leaving out (can't be programmed here).
+    private var pendingSkipped: Int { (pendingArea != nil) ? systems.count - (pendingArea?.count ?? 0) : 0 }
 
     // MARK: - Net info popover
 
@@ -253,14 +271,32 @@ struct MapLensView: View {
                 .frame(height: min(200, CGFloat(infoChannels.count) * 26 + 4))
             }
             Divider().overlay(Theme.border)
-            Button { addFromInfo(sys) } label: {
-                Label("Add to “\(listLabel)”", systemImage: "plus.circle")
-                    .frame(maxWidth: .infinity)
+            // Three states: the radio can't take this system (block reason) · no target loaded yet
+            // (readiness reason) · addable (the Add button). The reasons wrap in a subtle chip.
+            if let reason = blocked?(sys) {
+                reasonChip(reason.detail)
+            } else if let notReady = addReadyReason {
+                reasonChip(notReady)
+            } else {
+                Button { addFromInfo(sys) } label: {
+                    Label("Add to “\(listLabel)”", systemImage: "plus.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small).disabled(!canAddPin(sys))
             }
-            .buttonStyle(.borderedProminent).controlSize(.small).disabled(!canAdd || !canAddPin(sys))
         }
         .padding(14)
         .frame(width: 280)
+    }
+
+    /// A wrapping "why you can't add this" chip for the info popover (no truncation, noticeable).
+    private func reasonChip(_ text: String) -> some View {
+        Label(text, systemImage: "slash.circle")
+            .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.fg2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.chip))
     }
 
     private func metaBadge(_ text: String) -> some View {
@@ -281,11 +317,13 @@ struct MapLensView: View {
     }
 
     /// Whether this pin's source permits programming its channels (else browse-only).
-    private func canAddPin(_ sys: GeoSystem) -> Bool { addAllowed?(sys) ?? true }
+    private func canAddPin(_ sys: GeoSystem) -> Bool {
+        (addAllowed?(sys) ?? true) && blocked?(sys) == nil
+    }
 
     /// Append this net (radius-scoped) to the open list, then close the popover.
     private func addFromInfo(_ sys: GeoSystem) {
-        guard canAdd else { return }
+        guard addReadyReason == nil, canAddPin(sys) else { return }
         infoID = nil
         onAdd(sys.id, center.latitude, center.longitude, radiusMi)
     }
@@ -331,8 +369,14 @@ struct MapLensView: View {
                     .frame(width: 46, alignment: .leading)
             }
             Button("Load here", action: reloadHere).buttonStyle(.borderedProminent).controlSize(.small)
-            if !systems.isEmpty, canAdd {
-                Button("Add area (\(systems.count))", action: addArea).controlSize(.small)
+            // "Add area" shows for any active radio (parity), counts only the systems this radio can
+            // program, and is disabled with a hint until a target is loaded.
+            if showAdd, !systems.isEmpty {
+                let addable = systems.filter { blocked?($0) == nil }
+                Button("Add area (\(addable.count))") { addArea(addable) }
+                    .controlSize(.small)
+                    .disabled(addReadyReason != nil || addable.isEmpty)
+                    .help(addReadyReason ?? "Add the \(addable.count) programmable system\(addable.count == 1 ? "" : "s") in range")
             }
             Text(systems.isEmpty ? status : "\(systems.count) systems in range")
                 .font(.system(size: 11)).foregroundStyle(Theme.fg3).lineLimit(1)
@@ -350,11 +394,12 @@ struct MapLensView: View {
         live = true
         // The geo provider can be slow the first time (a network source fetches site locations), so
         // run it off-main and show a locating state; instant thereafter (cached).
-        let (clat, clon, r, f, conv) = (center.latitude, center.longitude, radiusMi, filter, conventionalOnly)
+        let (clat, clon, r, f) = (center.latitude, center.longitude, radiusMi, filter)
         if systems.isEmpty { status = "Locating systems…" }
         DispatchQueue.global(qos: .userInitiated).async {
-            var found = geo(clat, clon, r, f)
-            if conv { found = found.filter { $0.kind != "Trunk" } }
+            // Every system the active sources cover is plotted; ones the target radio can't program
+            // are dimmed by `pin(_:)` (not filtered out), so the map stays a full picture of the area.
+            let found = geo(clat, clon, r, f)
             DispatchQueue.main.async {
                 systems = found
                 status = systems.isEmpty ? "No systems with coverage here." : ""
@@ -489,14 +534,15 @@ struct MapLensView: View {
     }
 
     /// Stage the whole in-range area for confirmation.
-    private func addArea() {
-        guard canAdd, !systems.isEmpty else { return }
-        pendingArea = systems.count
+    /// Stage the programmable in-range systems for confirmation (the incompatible ones are excluded).
+    private func addArea(_ addable: [GeoSystem]) {
+        guard addReadyReason == nil, !addable.isEmpty else { return }
+        pendingArea = addable
     }
 
-    /// Add every in-range system, then clear the pending state.
+    /// Add every staged (programmable) system, then clear the pending state.
     private func commit() {
-        for sys in systems { onAdd(sys.id, center.latitude, center.longitude, radiusMi) }
+        for sys in pendingArea ?? [] { onAdd(sys.id, center.latitude, center.longitude, radiusMi) }
         pendingArea = nil
     }
 }

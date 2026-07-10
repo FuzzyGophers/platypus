@@ -57,6 +57,12 @@ struct RadioCardView<Detail: View>: View {
     var readDisabled = false
     var writeDisabled = false
     var writeHelp = "Save to the device"
+    /// The write action's verb — "Write" (to a live device) vs "Save" (to a backup folder on disk).
+    var writeLabel = "Write"
+    /// Optional secondary write action (SD-card only): push an edited backup onto a connected card.
+    /// Rendered as an extra button after Write when set.
+    var onWriteToRadio: (() -> Void)? = nil
+    var writeToRadioLabel = "Write to Card…"
 
     @ViewBuilder var detail: () -> Detail
 
@@ -119,8 +125,12 @@ struct RadioCardView<Detail: View>: View {
                 .help("Open a saved backup to edit")
             Spacer(minLength: 8)
             Button("Read", action: onRead).controlSize(.small).disabled(readDisabled)
-            Button("Write", action: onWrite).buttonStyle(.borderedProminent).controlSize(.small)
+            Button(writeLabel, action: onWrite).buttonStyle(.borderedProminent).controlSize(.small)
                 .disabled(writeDisabled).help(writeHelp)
+            if let onWriteToRadio {
+                Button(writeToRadioLabel, action: onWriteToRadio).controlSize(.small)
+                    .help("Push this backup onto a connected card (Restore, or write your favorites)")
+            }
         }
     }
 

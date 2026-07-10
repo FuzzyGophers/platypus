@@ -91,6 +91,12 @@ protocol BrowseSource: AnyObject {
     /// warm). The map loops this in the background so pins refine in bursts without blocking. Default:
     /// 0 — local sources already place every pin. Call off the main thread.
     func warmNextPins(at location: BrowseLocation, batch: Int) -> Int
+
+    /// Program one of this source's systems (by its `systemRef`) onto an **SD-card scanner** by
+    /// **synthesizing** device favorites records and merging them into `fav` — returning a new handle.
+    /// Default: nil (this source can't synthesize to an SD card; e.g. HPDB uses the library-append
+    /// path). RadioReference implements it. Networked — call off the main thread.
+    func appendToFavorites(_ fav: Favorites, systemRef: String, departmentsOn: Bool) -> Favorites?
 }
 
 extension BrowseSource {
@@ -103,4 +109,7 @@ extension BrowseSource {
     var lastFetched: Date? { nil }
     func refreshCache() {}
     func warmNextPins(at location: BrowseLocation, batch: Int) -> Int { 0 }
+    func appendToFavorites(_ fav: Favorites, systemRef: String, departmentsOn: Bool) -> Favorites? {
+        nil
+    }
 }
