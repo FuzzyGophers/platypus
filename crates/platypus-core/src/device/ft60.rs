@@ -291,6 +291,138 @@ pub struct Ft60Channel {
     pub skip: &'static str,
 }
 
+/// Beyond a normal same-band repeater shift, an input freq is stored as a split (its own TX freq)
+/// rather than a +/- offset — e.g. a cross-band repeater.
+const MAX_REPEATER_SHIFT_HZ: u64 = 10_000_000;
+
+/// Parse a source tone string into the FT-60's structured tone + tone-mode. Handles both the RR
+/// wire form (`"131.8 PL"` CTCSS, `"023 DPL"` DCS, `"CSQ"`/empty = none) and the model form
+/// (`"TONE=C156.7"` / `"TONE=D023"`). Conventional channels only carry CTCSS/DCS here (NAC/color
+/// codes are trunked-digital, filtered out before synthesis).
+fn program_tone(raw: Option<&str>) -> (Tone, &'static str) {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (Tone::None, "");
+    };
+    if s.eq_ignore_ascii_case("csq")
+        || s.eq_ignore_ascii_case("off")
+        || s.eq_ignore_ascii_case("none")
+    {
+        return (Tone::None, "");
+    }
+    let ctcss = |v: &str| {
+        v.trim()
+            .parse::<f64>()
+            .ok()
+            .map(|f| (f * 10.0).round() as u16)
+    };
+    let dcs = |v: &str| v.trim().trim_start_matches(['D', 'd']).parse::<u16>().ok();
+
+    // Model form: "TONE=C156.7" / "TONE=D023" (also a bare "C…"/"D…").
+    let body = s.strip_prefix("TONE=").unwrap_or(s);
+    if let Some(v) = body.strip_prefix(['C', 'c']) {
+        if let Some(hz) = ctcss(v) {
+            return (Tone::Ctcss(hz), "TSQL");
+        }
+    }
+    if let Some(v) = body.strip_prefix(['D', 'd']) {
+        if let Some(code) = dcs(v.split_whitespace().next().unwrap_or("")) {
+            return (Tone::Dcs(code), "DTCS");
+        }
+    }
+    // RR wire form: "131.8 PL" (CTCSS) / "023 DPL" (DCS).
+    let mut parts = s.split_whitespace();
+    if let (Some(val), Some(kind)) = (parts.next(), parts.next()) {
+        match kind.to_ascii_uppercase().as_str() {
+            "PL" => {
+                if let Some(hz) = ctcss(val) {
+                    return (Tone::Ctcss(hz), "TSQL");
+                }
+            }
+            "DPL" => {
+                if let Some(code) = dcs(val) {
+                    return (Tone::Dcs(code), "DTCS");
+                }
+            }
+            _ => {}
+        }
+    }
+    // Bare number → CTCSS.
+    if let Some(hz) = ctcss(s) {
+        return (Tone::Ctcss(hz), "TSQL");
+    }
+    (Tone::None, "")
+}
+
+impl Ft60Channel {
+    /// Build an FT-60 memory from a source-agnostic [`ProgramChannel`] (a conventional analog
+    /// frequency; talkgroups are filtered out upstream). Recovers repeater duplex/offset from the
+    /// channel's `input_hz`, maps mode + tone into the radio's vocabulary, and defaults the
+    /// radio-only fields (High power, 5 kHz step, no banks, no skip). `None` if it has no RX freq.
+    pub fn from_program(ch: &crate::synthesize::ProgramChannel, slot: u16) -> Option<Ft60Channel> {
+        let rx_hz = ch.freq_hz?;
+        let mode = match ch
+            .mode
+            .as_deref()
+            .map(|m| m.to_ascii_uppercase())
+            .as_deref()
+        {
+            Some("NFM" | "FMN") => "NFM",
+            Some("AM") => "AM",
+            _ => "FM", // FM + anything unrecognized → FM (the analog default)
+        };
+        let (tone, tone_mode) = program_tone(ch.tone.as_deref());
+        // Repeater shift from the input (TX) freq, when present + distinct. A normal same-band
+        // shift is a +/- offset; anything larger (e.g. cross-band) is stored as a split.
+        let (duplex, offset_hz, tx_hz) = match ch.input_hz {
+            Some(tx) if tx != rx_hz => {
+                let offset = rx_hz.abs_diff(tx);
+                if offset <= MAX_REPEATER_SHIFT_HZ {
+                    (if tx > rx_hz { "+" } else { "-" }, offset, 0)
+                } else {
+                    ("split", 0, tx)
+                }
+            }
+            _ => ("", 0, 0),
+        };
+        Some(Ft60Channel {
+            slot,
+            name: ch.name.chars().take(6).collect(),
+            rx_hz,
+            duplex,
+            offset_hz,
+            tx_hz,
+            mode,
+            tone_mode,
+            tone,
+            power: 0,
+            step: 0,
+            banks: Vec::new(),
+            skip: "",
+        })
+    }
+}
+
+/// Synthesize FT-60 memories from source-agnostic systems — the clone-image sibling of the SD-card
+/// [`synthesize_favorites`](crate::synthesize::synthesize_favorites). Applies the radio's capability
+/// restrictions + dedupe via [`programmable_channels`](crate::synthesize::programmable_channels)
+/// (with the FT-60's `analog_conventional` support: trunked systems + digital channels drop out),
+/// then maps each survivor to an [`Ft60Channel`], slot-numbered contiguously from `start_slot`.
+pub fn synthesize_ft60(
+    systems: &[crate::synthesize::ProgramSystem],
+    support: &super::profile::ProgramSupport,
+    start_slot: u16,
+) -> Vec<Ft60Channel> {
+    let mut out = Vec::new();
+    let mut slot = start_slot;
+    for ch in crate::synthesize::programmable_channels(systems, support) {
+        if let Some(c) = Ft60Channel::from_program(&ch, slot) {
+            out.push(c);
+            slot += 1;
+        }
+    }
+    out
+}
+
 /// A decoded FT-60 clone image. Owns the raw bytes so `encode` is byte-exact.
 #[derive(Debug, Clone)]
 pub struct Ft60Image {
@@ -1358,5 +1490,179 @@ mod tests {
         let mut b = vec![0u8; CloneSpec::FT60.image_size];
         b[0] = b'X'; // wrong magic
         assert!(Ft60Image::decode(&b).is_err());
+    }
+}
+
+#[cfg(test)]
+mod synth_tests {
+    use super::*;
+    use crate::device::profile::ProgramSupport;
+    use crate::provider::SystemKind;
+    use crate::synthesize::{programmable_channels, ProgramChannel, ProgramGroup, ProgramSystem};
+
+    fn chan(name: &str, out: u64, input: Option<u64>, mode: &str, tone: &str) -> ProgramChannel {
+        ProgramChannel {
+            name: name.into(),
+            freq_hz: Some(out),
+            input_hz: input,
+            tgid: None,
+            mode: (!mode.is_empty()).then(|| mode.to_string()),
+            tone: (!tone.is_empty()).then(|| tone.to_string()),
+            service_type: None,
+        }
+    }
+    fn conv(name: &str, channels: Vec<ProgramChannel>) -> ProgramSystem {
+        ProgramSystem {
+            name: name.into(),
+            kind: SystemKind::Conventional,
+            tech: Some("Conventional".into()),
+            county_ids: vec![],
+            state_ids: vec![],
+            sites: vec![],
+            groups: vec![ProgramGroup {
+                name: name.into(),
+                geo: None,
+                channels,
+            }],
+        }
+    }
+    fn p25_trunk() -> ProgramSystem {
+        ProgramSystem {
+            name: "Statewide P25".into(),
+            kind: SystemKind::Trunk,
+            tech: Some("Project 25".into()),
+            county_ids: vec![],
+            state_ids: vec![],
+            sites: vec![],
+            groups: vec![ProgramGroup {
+                name: "TGs".into(),
+                geo: None,
+                channels: vec![ProgramChannel {
+                    name: "PD Disp".into(),
+                    freq_hz: None,
+                    input_hz: None,
+                    tgid: Some("100".into()),
+                    mode: Some("DIGITAL".into()),
+                    tone: None,
+                    service_type: None,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn ft60_keeps_only_analog_conventional_and_recovers_shift() {
+        let systems = vec![
+            p25_trunk(), // trunked → dropped (no trunking)
+            conv(
+                "Ham",
+                vec![
+                    // 2m repeater: RX 146.940, TX 146.340 → "-" 600 kHz, CTCSS 131.8.
+                    chan("W1AW Rpt", 146_940_000, Some(146_340_000), "FM", "131.8 PL"),
+                    // Conventional DMR → digital, dropped by the analog-only filter.
+                    chan("DMR Net", 145_500_000, None, "DMR", ""),
+                ],
+            ),
+        ];
+        let out = synthesize_ft60(&systems, &ProgramSupport::analog_conventional(), 0);
+        assert_eq!(out.len(), 1, "only the analog conventional freq survives");
+        let ch = &out[0];
+        assert_eq!(ch.slot, 0);
+        assert_eq!(ch.rx_hz, 146_940_000);
+        assert_eq!(ch.name, "W1AW R"); // 6-char truncation
+        assert_eq!(ch.mode, "FM");
+        assert_eq!(ch.duplex, "-");
+        assert_eq!(ch.offset_hz, 600_000);
+        assert_eq!(ch.tx_hz, 0);
+        assert_eq!(ch.tone, Tone::Ctcss(1318));
+        assert_eq!(ch.tone_mode, "TSQL");
+    }
+
+    #[test]
+    fn ft60_positive_shift_split_and_simplex() {
+        let sys = conv(
+            "Mix",
+            vec![
+                chan("Plus", 442_000_000, Some(447_000_000), "FM", ""), // 70cm + 5 MHz
+                chan("Split", 145_000_000, Some(445_000_000), "FM", ""), // cross-band → split
+                chan("Simplex", 146_520_000, None, "NFM", ""),
+            ],
+        );
+        let out = synthesize_ft60(&[sys], &ProgramSupport::analog_conventional(), 0);
+        assert_eq!(out.len(), 3);
+        assert_eq!(
+            (out[0].duplex, out[0].offset_hz, out[0].tx_hz),
+            ("+", 5_000_000, 0)
+        );
+        assert_eq!(
+            (out[1].duplex, out[1].offset_hz, out[1].tx_hz),
+            ("split", 0, 445_000_000)
+        );
+        assert_eq!((out[2].duplex, out[2].offset_hz, out[2].tx_hz), ("", 0, 0));
+        assert_eq!(out[2].mode, "NFM");
+        // Slots stay contiguous.
+        assert_eq!([out[0].slot, out[1].slot, out[2].slot], [0, 1, 2]);
+    }
+
+    #[test]
+    fn ft60_dedupes_repeated_freq_and_tone() {
+        let systems = vec![
+            conv(
+                "County A",
+                vec![chan("Fire", 154_265_000, None, "NFM", "131.8 PL")],
+            ),
+            conv(
+                "County B",
+                vec![chan("Fire2", 154_265_000, None, "NFM", "131.8 PL")],
+            ),
+            // Same freq, different tone → a distinct channel (kept).
+            conv(
+                "County C",
+                vec![chan("Fire3", 154_265_000, None, "NFM", "156.7 PL")],
+            ),
+        ];
+        let out = synthesize_ft60(&systems, &ProgramSupport::analog_conventional(), 0);
+        assert_eq!(
+            out.len(),
+            2,
+            "same freq+tone collapses; different tone survives"
+        );
+    }
+
+    #[test]
+    fn full_capability_radio_keeps_everything() {
+        // ProgramSupport::all() (trunking + every modulation) is a no-op filter — the trunk
+        // talkgroup and the conventional freqs all pass.
+        let kept = programmable_channels(
+            &[
+                p25_trunk(),
+                conv("Ham", vec![chan("R", 146_940_000, None, "FM", "")]),
+            ],
+            &ProgramSupport::all(),
+        );
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn program_tone_parses_both_wire_and_model_forms() {
+        assert_eq!(program_tone(Some("131.8 PL")), (Tone::Ctcss(1318), "TSQL"));
+        assert_eq!(program_tone(Some("023 DPL")), (Tone::Dcs(23), "DTCS"));
+        assert_eq!(program_tone(Some("D023 DPL")), (Tone::Dcs(23), "DTCS"));
+        assert_eq!(
+            program_tone(Some("TONE=C156.7")),
+            (Tone::Ctcss(1567), "TSQL")
+        );
+        assert_eq!(program_tone(Some("TONE=D023")), (Tone::Dcs(23), "DTCS"));
+        assert_eq!(program_tone(Some("CSQ")), (Tone::None, ""));
+        assert_eq!(program_tone(Some("")), (Tone::None, ""));
+        assert_eq!(program_tone(None), (Tone::None, ""));
+    }
+
+    #[test]
+    fn from_program_mode_fallbacks() {
+        let unknown = chan("X", 146_000_000, None, "P25", ""); // unknown-to-FT60 mode → FM
+        assert_eq!(Ft60Channel::from_program(&unknown, 0).unwrap().mode, "FM");
+        let am = chan("Air", 121_500_000, None, "AM", "");
+        assert_eq!(Ft60Channel::from_program(&am, 0).unwrap().mode, "AM");
     }
 }

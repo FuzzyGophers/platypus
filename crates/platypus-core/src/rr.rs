@@ -188,8 +188,8 @@ pub enum RrSystem {
 // Mapping: RR types -> canonical model. Pure, dependency-free, tested offline.
 // ---------------------------------------------------------------------------
 
-/// MHz (RR's unit) -> Hz (the canonical unit). Rounds to the nearest Hz.
-fn mhz_to_hz(mhz: f64) -> Option<u64> {
+/// MHz (RR's unit) -> Hz (the canonical unit). Rounds to the nearest Hz; `None` for non-positive.
+pub(crate) fn mhz_to_hz(mhz: f64) -> Option<u64> {
     if mhz > 0.0 {
         Some((mhz * 1_000_000.0).round() as u64)
     } else {

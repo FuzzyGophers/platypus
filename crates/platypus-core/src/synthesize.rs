@@ -19,11 +19,12 @@
 //! the existing, device-validated [`favorites::build_favorites`]. A clone-image (FT-60)
 //! emitter consuming the same [`ProgramSystem`] is the natural next radio.
 
-use crate::device::SdCardProfile;
+use crate::device::{Modulation, ProgramSupport, SdCardProfile};
 use crate::favorites::build_favorites;
 use crate::format::{Document, Line, LineEnding};
 use crate::provider::SystemKind;
-use crate::rr::{RrConventionalSystem, RrSystem, RrTrunkedSystem};
+use crate::rr::{mhz_to_hz, RrConventionalSystem, RrSystem, RrTrunkedSystem};
+use std::collections::BTreeSet;
 
 /// A geographic coverage point (a site or a group), source-agnostic.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +56,9 @@ pub struct ProgramChannel {
     pub name: String,
     /// Conventional frequency (Hz); `None` for a talkgroup.
     pub freq_hz: Option<u64>,
+    /// Repeater **input** (TX) frequency (Hz), when the source carries it — lets a clone-image
+    /// emitter recover duplex/offset. `None` = simplex or a talkgroup.
+    pub input_hz: Option<u64>,
     /// Talkgroup decimal id; `None` for a conventional frequency.
     pub tgid: Option<String>,
     /// Modulation/audio type as the device stores it (`NFM`/`AM`, or `DIGITAL`/`ANALOG`).
@@ -91,10 +95,6 @@ pub struct ProgramSystem {
 // ---------------------------------------------------------------------------
 // Source mappings (RadioReference now; other sources map into the same model).
 // ---------------------------------------------------------------------------
-
-fn mhz_to_hz(mhz: f64) -> Option<u64> {
-    (mhz > 0.0).then(|| (mhz * 1_000_000.0).round() as u64)
-}
 
 /// Normalize an RR conventional `mode` (`FM`/`FMN`/`AM`/…) to the SD-card vocabulary.
 fn conventional_mode(rr_mode: &str) -> Option<String> {
@@ -157,6 +157,7 @@ impl From<&RrTrunkedSystem> for ProgramSystem {
                     tg.tg_alpha.clone()
                 },
                 freq_hz: None,
+                input_hz: None,
                 tgid: Some(tg.tg_dec.clone()),
                 mode: talkgroup_mode(&tg.tg_mode),
                 tone: None,
@@ -207,6 +208,11 @@ impl From<&RrConventionalSystem> for ProgramSystem {
                             f.alpha.clone()
                         },
                         freq_hz: mhz_to_hz(f.out_mhz),
+                        // RR carries the repeater input as `in` — keep it when it's a real,
+                        // distinct TX freq so a clone-image radio can recover the duplex/offset.
+                        input_hz: (f.in_mhz > 0.0 && f.in_mhz != f.out_mhz)
+                            .then(|| mhz_to_hz(f.in_mhz))
+                            .flatten(),
                         tgid: None,
                         mode: conventional_mode(&f.mode),
                         tone: (!f.tone.is_empty()).then(|| f.tone.clone()),
@@ -234,6 +240,47 @@ impl From<&RrSystem> for ProgramSystem {
             RrSystem::Conventional(c) => c.into(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Capability filter: the one thing that differs between radios.
+// ---------------------------------------------------------------------------
+
+/// Flatten the programmable **channels** from `systems`, keeping only what a radio with this
+/// [`ProgramSupport`] can store, de-duplicated. This capability gate is the *only* per-radio
+/// difference in synthesis: a trunk-less radio drops trunked systems (and any talkgroup); a channel
+/// survives only if its modulation — [`Modulation::classify`] of the system tech + channel mode — is
+/// one the radio supports (e.g. an analog-only handheld keeps FM conventional, drops P25/DMR). The
+/// dedupe key `(freq_hz, tgid, tone)` collapses the same repeater listed in two counties into one
+/// memory; first occurrence keeps its name. A clone-image emitter builds device channels from this.
+pub fn programmable_channels(
+    systems: &[ProgramSystem],
+    support: &ProgramSupport,
+) -> Vec<ProgramChannel> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for sys in systems {
+        // A trunked system needs a trunk-tracking radio.
+        if matches!(sys.kind, SystemKind::Trunk) && !support.trunking {
+            continue;
+        }
+        for group in &sys.groups {
+            for ch in &group.channels {
+                // A talkgroup needs trunking; a conventional memory needs a frequency.
+                if ch.tgid.is_some() && !support.trunking {
+                    continue;
+                }
+                let modulation = Modulation::classify(sys.tech.as_deref(), ch.mode.as_deref());
+                if !support.supports(modulation) {
+                    continue;
+                }
+                if seen.insert((ch.freq_hz, ch.tgid.clone(), ch.tone.clone())) {
+                    out.push(ch.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
