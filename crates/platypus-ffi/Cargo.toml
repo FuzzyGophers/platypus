@@ -20,6 +20,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # `http` feature drives the RadioReference fetch over native OS TLS (Secure Transport on macOS).
 # The core itself stays dependency-free.
 [dependencies]
-platypus-core = { path = "../platypus-core", version = "0.2.0" }
-platypus-serial = { path = "../platypus-serial", version = "0.2.0" }
-platypus-rr = { path = "../platypus-rr", version = "0.2.0", features = ["http"] }
+platypus-core = { path = "../platypus-core", version = "0.3.0" }
+platypus-serial = { path = "../platypus-serial", version = "0.3.0" }
+platypus-rr = { path = "../platypus-rr", version = "0.3.0", features = ["http"] }

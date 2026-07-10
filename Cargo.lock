@@ -387,11 +387,11 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "platypus-core"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "platypus-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "platypus-core",
  "platypus-rr",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "platypus-rr"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "native-tls",
  "platypus-core",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "platypus-serial"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "nix",
  "platypus-core",

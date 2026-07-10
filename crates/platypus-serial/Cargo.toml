@@ -12,5 +12,5 @@ publish.workspace = true
 # The serial transport (I/O) sibling of the zero-dep core. Uses `nix` (a safe MIT termios
 # wrapper over libc) so the core itself stays dependency-free. Unix/macOS first.
 [dependencies]
-platypus-core = { path = "../platypus-core", version = "0.2.0" }
+platypus-core = { path = "../platypus-core", version = "0.3.0" }
 nix = { version = "0.29", features = ["term"] }

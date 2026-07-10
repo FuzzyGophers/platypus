@@ -20,7 +20,7 @@ publish.workspace = true
 # is allowed via a scoped `[[licenses.exceptions]]` in deny.toml — the global allow-list stays
 # Apache-2.0-free. `ureq`'s `default-features = false` keeps rustls/`ring` out of the tree.
 [dependencies]
-platypus-core = { path = "../platypus-core", version = "0.2.0" }
+platypus-core = { path = "../platypus-core", version = "0.3.0" }
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
 native-tls = { version = "0.2", optional = true }
