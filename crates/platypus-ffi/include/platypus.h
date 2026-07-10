@@ -606,6 +606,20 @@ PlatypusFavorites *platypus_favorites_append_from_library(const PlatypusFavorite
                                                           bool departments_on);
 
 /*
+ Append a **RadioReference** system (by browsed ref, `t<sid>`/`c<scid>`) to a favorites list,
+ synthesizing SDS150 records from the fetched RR data (`platypus-core::synthesize`) and merging
+ with dedupe. Returns a **new** handle (mirroring [`platypus_favorites_append_from_library`]).
+ Networked (fetches the system's sites/talkgroups). Null on bad input or a failed fetch.
+
+ # Safety
+ `fav`/`rr` valid or null; `system_ref` a valid NUL-terminated C string.
+ */
+PlatypusFavorites *platypus_favorites_append_from_rr(const PlatypusFavorites *fav,
+                                                     const PlatypusRrSource *rr,
+                                                     const char *system_ref,
+                                                     bool departments_on);
+
+/*
  Free a favorites handle. Safe with null.
 
  # Safety

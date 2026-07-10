@@ -106,6 +106,19 @@ pub extern "C" fn platypus_radios_json() -> *mut c_char {
                 out.push_str(",\"nameLen\":");
                 out.push_str(&cap.name_len.to_string());
             }
+            // What the radio can be programmed with — trunking + supported modulations — so the
+            // browse can de-emphasize/badge systems this radio can't take, and show a legend.
+            let support = p.program_support();
+            out.push_str(",\"trunking\":");
+            out.push_str(if support.trunking { "true" } else { "false" });
+            out.push_str(",\"modulations\":[");
+            for (j, m) in support.modulations().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                push_json_string(&mut out, m.label());
+            }
+            out.push(']');
             out.push('}');
         }
         out.push(']');
@@ -2090,6 +2103,45 @@ pub unsafe extern "C" fn platypus_favorites_append_from_library(
             return ptr::null_mut();
         };
         // Merge with dedupe: new channels join a matching system instead of duplicating it.
+        Box::into_raw(Box::new(PlatypusFavorites {
+            doc: favorites::merge_favorites(&f.doc, &added, f.profile),
+            profile: f.profile,
+        }))
+    })
+}
+
+/// Append a **RadioReference** system (by browsed ref, `t<sid>`/`c<scid>`) to a favorites list,
+/// synthesizing SDS150 records from the fetched RR data (`platypus-core::synthesize`) and merging
+/// with dedupe. Returns a **new** handle (mirroring [`platypus_favorites_append_from_library`]).
+/// Networked (fetches the system's sites/talkgroups). Null on bad input or a failed fetch.
+///
+/// # Safety
+/// `fav`/`rr` valid or null; `system_ref` a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn platypus_favorites_append_from_rr(
+    fav: *const PlatypusFavorites,
+    rr: *const rr::PlatypusRrSource,
+    system_ref: *const c_char,
+    departments_on: bool,
+) -> *mut PlatypusFavorites {
+    ffi_guard(ptr::null_mut(), move || unsafe {
+        let Some(f) = fav.as_ref() else {
+            return ptr::null_mut();
+        };
+        let Some(src) = rr.as_ref() else {
+            return ptr::null_mut();
+        };
+        let Some(sref) = cstr_to_str(system_ref) else {
+            return ptr::null_mut();
+        };
+        let Some(sys) = rr::rr_system_for(src, sref) else {
+            return ptr::null_mut();
+        };
+        let added = platypus_core::synthesize::synthesize_favorites_from_rr(
+            &[sys],
+            f.profile,
+            departments_on,
+        );
         Box::into_raw(Box::new(PlatypusFavorites {
             doc: favorites::merge_favorites(&f.doc, &added, f.profile),
             profile: f.profile,

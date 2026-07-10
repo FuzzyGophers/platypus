@@ -743,17 +743,17 @@ fn push_geo(
     out.push('}');
 }
 
-/// Fetch + map a single system by ref (`t<sid>` trunked, `c<scid>` conventional). Networked; caches
-/// nothing itself (the caller caches). `None` on a bad ref or an empty/failed fetch.
-fn fetch_system(
+/// Fetch a single **rich** system by ref (`t<sid>` trunked, `c<scid>` conventional) — the full
+/// `RrSystem` (sites + control/voice freqs preserved), for synthesis. Networked. `None` on a bad
+/// ref or an empty/failed fetch.
+fn fetch_rr_system(
     client: &RrClient,
     sref: &str,
     county: &CountyContents,
     zip: &ZipInfo,
-) -> Option<SystemRecord> {
+) -> Option<RrSystem> {
     if let Some(sid) = sref.strip_prefix('t').and_then(|s| s.parse::<u32>().ok()) {
-        let sys = client.fetch_trunked(sid).ok().flatten()?;
-        Some(SystemRecord::from(&RrSystem::Trunked(sys)))
+        Some(RrSystem::Trunked(client.fetch_trunked(sid).ok().flatten()?))
     } else if let Some(scid) = sref.strip_prefix('c').and_then(|s| s.parse::<u32>().ok()) {
         let name = county
             .subcats
@@ -761,14 +761,32 @@ fn fetch_system(
             .find(|s| s.scid == scid as u64)
             .map(|s| s.name.as_str())
             .unwrap_or("Conventional");
-        let sys = client
-            .fetch_conventional(scid, name, vec![zip.ctid])
-            .ok()
-            .flatten()?;
-        Some(SystemRecord::from(&RrSystem::Conventional(sys)))
+        Some(RrSystem::Conventional(
+            client
+                .fetch_conventional(scid, name, vec![zip.ctid])
+                .ok()
+                .flatten()?,
+        ))
     } else {
         None
     }
+}
+
+/// Fetch + map a single system by ref to the flat browse `SystemRecord`. `None` on a bad ref or
+/// an empty/failed fetch.
+fn fetch_system(
+    client: &RrClient,
+    sref: &str,
+    county: &CountyContents,
+    zip: &ZipInfo,
+) -> Option<SystemRecord> {
+    fetch_rr_system(client, sref, county, zip).map(|s| SystemRecord::from(&s))
+}
+
+/// Fetch the rich `RrSystem` for a browsed system ref, for favorites synthesis (used by the FFI
+/// that programs RadioReference onto an SD-card scanner). `pub(crate)` so `lib.rs` can reach it.
+pub(crate) fn rr_system_for(src: &PlatypusRrSource, sref: &str) -> Option<RrSystem> {
+    fetch_rr_system(&src.client, sref, &src.county, &src.zip)
 }
 
 /// The resolved location + system count for the browse header (the location chip).
