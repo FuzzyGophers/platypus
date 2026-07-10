@@ -178,6 +178,15 @@ fn return_node(xml: &str) -> Option<Node> {
     Node::parse(xml)?.find("return").cloned()
 }
 
+/// Map the `<item>` children of a response's `<return>` array through `f` — the shared shape of the
+/// per-endpoint list parsers. `f` returns `None` to skip an item; a missing/empty `<return>` yields
+/// an empty vec.
+fn parse_items<T>(xml: &str, f: impl Fn(&Node) -> Option<T>) -> Vec<T> {
+    return_node(xml)
+        .map(|root| root.items().filter_map(f).collect())
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Response parsers → core RR structs.
 // ---------------------------------------------------------------------------
@@ -304,62 +313,51 @@ pub fn parse_trs_details(xml: &str) -> Option<Trs> {
 
 /// `getTrsSites` → the sites (each with its control/voice frequencies).
 pub fn parse_trs_sites(xml: &str) -> Vec<TrsSite> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|s| {
-            let frequencies = s
-                .child("siteFreqs")
-                .map(|fs| {
-                    fs.items()
-                        .filter_map(|f| {
-                            Some(SiteFrequency {
-                                freq_mhz: f.f64_child("freq")?,
-                                use_: f.str_child("use"),
-                                lcn: f.u64_child("lcn").map(|v| v as u32),
-                            })
+    parse_items(xml, |s| {
+        let frequencies = s
+            .child("siteFreqs")
+            .map(|fs| {
+                fs.items()
+                    .filter_map(|f| {
+                        Some(SiteFrequency {
+                            freq_mhz: f.f64_child("freq")?,
+                            use_: f.str_child("use"),
+                            lcn: f.u64_child("lcn").map(|v| v as u32),
                         })
-                        .collect()
-                })
-                .unwrap_or_default();
-            TrsSite {
-                site_id: s.u64_child("siteId").unwrap_or(0) as u32,
-                site_number: s.u64_child("siteNumber").unwrap_or(0) as u32,
-                site_descr: s.str_child("siteDescr"),
-                lat: s.f64_child("lat").unwrap_or(0.0),
-                lon: s.f64_child("lon").unwrap_or(0.0),
-                range: s.f64_child("range").unwrap_or(0.0),
-                nac: s.child_text("nac").map(|t| t.to_string()),
-                frequencies,
-            }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(TrsSite {
+            site_id: s.u64_child("siteId").unwrap_or(0) as u32,
+            site_number: s.u64_child("siteNumber").unwrap_or(0) as u32,
+            site_descr: s.str_child("siteDescr"),
+            lat: s.f64_child("lat").unwrap_or(0.0),
+            lon: s.f64_child("lon").unwrap_or(0.0),
+            range: s.f64_child("range").unwrap_or(0.0),
+            nac: s.child_text("nac").map(|t| t.to_string()),
+            frequencies,
         })
-        .collect()
+    })
 }
 
 /// `getTrsTalkgroups` → the talkgroups (tags reduced to their numeric service-type ids).
 pub fn parse_talkgroups(xml: &str) -> Vec<Talkgroup> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|tg| Talkgroup {
+    parse_items(xml, |tg| {
+        Some(Talkgroup {
             tg_dec: tg.str_child("tgDec"),
             tg_alpha: tg.str_child("tgAlpha"),
             tg_descr: tg.str_child("tgDescr"),
             tg_mode: tg.str_child("tgMode"),
             tags: parse_tags(tg),
         })
-        .collect()
+    })
 }
 
 /// `getSubcatFreqs` → the conventional frequencies of a subcategory.
 pub fn parse_subcat_freqs(xml: &str) -> Vec<Freq> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|f| Freq {
+    parse_items(xml, |f| {
+        Some(Freq {
             out_mhz: f.f64_child("out").unwrap_or(0.0),
             in_mhz: f.f64_child("in").unwrap_or(0.0),
             alpha: f.str_child("alpha"),
@@ -368,7 +366,7 @@ pub fn parse_subcat_freqs(xml: &str) -> Vec<Freq> {
             mode: f.str_child("mode"),
             tags: parse_tags(f),
         })
-        .collect()
+    })
 }
 
 /// `getTrsType`/`getTrsFlavor`/`getTrsVoice` → the human name (`sTypeDescr` etc.).
@@ -446,21 +444,16 @@ pub struct TalkgroupCat {
 
 /// `getTrsTalkgroupCats` → a system's talkgroup categories (with geo for location-first ranking).
 pub fn parse_talkgroup_cats(xml: &str) -> Vec<TalkgroupCat> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .filter_map(|c| {
-            Some(TalkgroupCat {
-                tg_cid: c.u64_child("tgCid")?,
-                name: c.str_child("tgCname"),
-                lat: c.f64_child("lat").unwrap_or(0.0),
-                lon: c.f64_child("lon").unwrap_or(0.0),
-                range: c.f64_child("range").unwrap_or(0.0),
-                last_updated: parse_iso8601_epoch(&c.str_child("lastUpdated")).unwrap_or(0),
-            })
+    parse_items(xml, |c| {
+        Some(TalkgroupCat {
+            tg_cid: c.u64_child("tgCid")?,
+            name: c.str_child("tgCname"),
+            lat: c.f64_child("lat").unwrap_or(0.0),
+            lon: c.f64_child("lon").unwrap_or(0.0),
+            range: c.f64_child("range").unwrap_or(0.0),
+            last_updated: parse_iso8601_epoch(&c.str_child("lastUpdated")).unwrap_or(0),
         })
-        .collect()
+    })
 }
 
 /// Parse RR's ISO-8601 `dateTime` (`2026-01-01T00:00:00+00:00`, or trailing `Z`) to Unix epoch
@@ -513,16 +506,13 @@ pub struct Country {
 }
 
 pub fn parse_country_list(xml: &str) -> Vec<Country> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|c| Country {
+    parse_items(xml, |c| {
+        Some(Country {
             coid: c.u64_child("coid").unwrap_or(0),
             name: c.str_child("countryName"),
             code: c.str_child("countryCode"),
         })
-        .collect()
+    })
 }
 
 /// A state (`getStatesByList`, and `CountryInfo.stateList`).
@@ -577,15 +567,12 @@ pub struct County {
 }
 
 pub fn parse_counties(xml: &str) -> Vec<County> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|c| County {
+    parse_items(xml, |c| {
+        Some(County {
             ctid: c.u64_child("ctid").unwrap_or(0),
             name: c.str_child("countyName"),
         })
-        .collect()
+    })
 }
 
 /// A metro area (`getMetroArea`).
@@ -596,15 +583,12 @@ pub struct Metro {
 }
 
 pub fn parse_metros(xml: &str) -> Vec<Metro> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|m| Metro {
+    parse_items(xml, |m| {
+        Some(Metro {
             mid: m.u64_child("mid").unwrap_or(0),
             name: m.str_child("metroName"),
         })
-        .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -614,10 +598,7 @@ pub fn parse_metros(xml: &str) -> Vec<Metro> {
 /// `getTrsBySysid` → the trunked systems matching a decoded on-air System ID, as `CountyTrs`
 /// (`sid` is enough to drive `fetch_trunked`).
 pub fn parse_trs_list(xml: &str) -> Vec<CountyTrs> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items().map(county_trs_from).collect()
+    parse_items(xml, |n| Some(county_trs_from(n)))
 }
 
 /// A `searchCountyFreq`/`searchStateFreq`/`searchMetroFreq` hit — a conventional freq plus the refs
@@ -639,11 +620,8 @@ pub struct SearchResult {
 }
 
 pub fn parse_search_freqs(xml: &str) -> Vec<SearchResult> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|f| SearchResult {
+    parse_items(xml, |f| {
+        Some(SearchResult {
             out_mhz: f.f64_child("out").unwrap_or(0.0),
             in_mhz: f.f64_child("in").unwrap_or(0.0),
             alpha: f.str_child("alpha"),
@@ -657,7 +635,7 @@ pub fn parse_search_freqs(xml: &str) -> Vec<SearchResult> {
             ctid: f.u64_child("ctid").unwrap_or(0),
             tags: parse_tags(f),
         })
-        .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -703,15 +681,12 @@ pub struct FccServiceCode {
 }
 
 pub fn parse_fcc_service_codes(xml: &str) -> Vec<FccServiceCode> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|c| FccServiceCode {
+    parse_items(xml, |c| {
+        Some(FccServiceCode {
             code: c.str_child("code"),
             description: c.str_child("description"),
         })
-        .collect()
+    })
 }
 
 /// An FCC license near a query point (`fccGetProxCallsigns`) — with its distance from the point.
@@ -725,18 +700,15 @@ pub struct ProxCallsign {
 }
 
 pub fn parse_prox_callsigns(xml: &str) -> Vec<ProxCallsign> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|c| ProxCallsign {
+    parse_items(xml, |c| {
+        Some(ProxCallsign {
             callsign: c.str_child("callsign"),
             licensee: c.str_child("licensee"),
             lat: c.f64_child("lat").unwrap_or(0.0),
             lon: c.f64_child("lon").unwrap_or(0.0),
             distance: c.f64_child("distance").unwrap_or(0.0),
         })
-        .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -771,18 +743,15 @@ pub struct FeedBroadcast {
 }
 
 pub fn parse_feed_broadcasts(xml: &str) -> Vec<FeedBroadcast> {
-    let Some(root) = return_node(xml) else {
-        return Vec::new();
-    };
-    root.items()
-        .map(|b| FeedBroadcast {
+    parse_items(xml, |b| {
+        Some(FeedBroadcast {
             feed_id: b.u64_child("feedId").unwrap_or(0),
             descr: b.str_child("descr"),
             hostname: b.str_child("hostname"),
             port: b.str_child("port"),
             mount: b.str_child("mount"),
         })
-        .collect()
+    })
 }
 
 /// The `<tags>` array → core `Tag`s (RR sends only the numeric `tagId`; the name is resolved from
